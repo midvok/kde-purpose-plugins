@@ -1,0 +1,55 @@
+######################
+# OS Generated Files #
+######################
+.directory
+.DS_Store
+ehthumbs.db
+Thumbs.db
+
+#####################
+# IDE Project Files #
+#####################
+# JetBrains IDE
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+.history/
+*.code-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+###################
+# AI Config Files #
+###################
+.claude/agent-memory-local/
+.claude/worktrees/
+.claude/settings.local.json
+CLAUDE.local.md
+
+###################
+# Build Artifacts #
+###################
+__pycache__/
+node_modules/
+dist/
+out/
+*.map
+
+#########
+# Tests #
+#########
+.ruff_cache/
+
+##################
+# Custom Ignores #
+##################

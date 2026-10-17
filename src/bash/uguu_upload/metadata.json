@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Id": "uguu_upload",
+        "Name": "Upload to Uguu (Temporary)",
+        "Icon": "cloud-upload"
+    },
+    "X-Purpose-PluginTypes": [ "Export" ],
+    "X-Purpose-Constraints": [
+        "exec:socat",
+        "exec:curl",
+        "exec:jq"
+    ]
+}
