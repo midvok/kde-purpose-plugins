@@ -42,7 +42,6 @@ CLAUDE.local.md
 __pycache__/
 node_modules/
 dist/
-out/
 *.map
 
 #########

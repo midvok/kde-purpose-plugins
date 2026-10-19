@@ -1,0 +1,125 @@
+'==============================================================================
+' Shared style for PlantUML diagrams
+' Usage:
+'   !include _style.iuml
+'------------------------------------------------------------------------------
+' Color palette:
+'   Tailwind CSS colors (100 = fill, 600 = border, 900 = text)
+'
+' Color   Meaning              Fill     Border   Text     Other
+' Blue    steps, components  #e0f2fe  #0284c7  #0c4a6e  #0369a1
+' Green   the user, success  #dcfce7  #16a34a  #14532d  #16a34a
+' Red     failures, skipped  #fee2e2  -        -        #dc2626
+' Amber   decisions, files   #fef3c7  #d97706  #78350f
+' Yellow  notes              #fef9c3  #ca8a04  #713f12
+' Violet  external, states   #ede9fe  #7c3aed  #4c1d95  #5b21b6
+'
+' Neutral (slate):
+'   #f8fafc  fill: package, partition, divider, class
+'   #e2e8f0  fill: sequence group
+'   #94a3b8  borders: package, partition, group, divider; lifelines
+'   #64748b  arrows
+'   #475569  text: arrow labels, package, partition and group titles
+'   #334155  text: class attributes
+'   #1e293b  text: default
+'==============================================================================
+
+' Inline fills in the diagrams can use these variables:
+' e.g. $FAIL:**Skipped**;
+!$FAIL = "#fee2e2"
+!$OK = "#dcfce7"
+!$EXTERNAL = "#ede9fe"
+
+skinparam {
+    BackgroundColor transparent
+    DefaultFontName "Noto Sans"
+    DefaultFontSize 13
+    DefaultFontColor #1e293b
+    Shadowing false
+    RoundCorner 16
+    ArrowColor #64748b
+    ArrowThickness 1.2
+    ArrowFontColor #475569
+    ArrowFontSize 11
+}
+skinparam class {
+    BackgroundColor #f8fafc
+    HeaderBackgroundColor #e0f2fe
+    BorderColor #0284c7
+    BorderThickness 1.2
+    FontColor #0c4a6e
+    FontSize 15
+    AttributeFontColor #334155
+    StereotypeFontColor #0369a1
+}
+skinparam activity {
+    BackgroundColor #e0f2fe
+    BorderColor #0284c7
+    BorderThickness 1.2
+    FontColor #0c4a6e
+    DiamondBackgroundColor #fef3c7
+    DiamondBorderColor #d97706
+    DiamondFontColor #78350f
+    StartColor #16a34a
+}
+skinparam note {
+    BackgroundColor #fef9c3
+    BorderColor #ca8a04
+    FontColor #713f12
+}
+skinparam partition {
+    BackgroundColor #f8fafc
+    BorderColor #94a3b8
+    FontColor #475569
+}
+skinparam state {
+    BackgroundColor #ede9fe
+    BorderColor #7c3aed
+    BorderThickness 1.2
+    FontColor #4c1d95
+    AttributeFontColor #5b21b6
+    StartColor #16a34a
+    EndColor #dc2626
+}
+skinparam sequence {
+    ParticipantBackgroundColor #e0f2fe
+    ParticipantBorderColor #0284c7
+    ParticipantBorderThickness 1.2
+    ParticipantFontColor #0c4a6e
+    ActorBackgroundColor #dcfce7
+    ActorBorderColor #16a34a
+    ActorFontColor #14532d
+    LifeLineBorderColor #94a3b8
+    GroupBackgroundColor #e2e8f0
+    GroupBorderColor #94a3b8
+    GroupHeaderFontColor #475569
+    DividerBackgroundColor #f8fafc
+    DividerBorderColor #94a3b8
+    DividerFontColor #475569
+}
+skinparam rectangle {
+    BackgroundColor #e0f2fe
+    BorderColor #0284c7
+    BorderThickness 1.2
+    FontColor #0c4a6e
+}
+skinparam package {
+    BackgroundColor #f8fafc
+    BorderColor #94a3b8
+    FontColor #475569
+}
+skinparam actor {
+    BackgroundColor #dcfce7
+    BorderColor #16a34a
+    FontColor #14532d
+}
+skinparam file {
+    BackgroundColor #fef3c7
+    BorderColor #d97706
+    FontColor #78350f
+}
+skinparam cloud {
+    BackgroundColor #ede9fe
+    BorderColor #7c3aed
+    FontColor #4c1d95
+}

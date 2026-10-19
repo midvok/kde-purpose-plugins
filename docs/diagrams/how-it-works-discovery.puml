@@ -1,0 +1,27 @@
+@startuml
+!include _style.iuml
+
+title "Discovery: is the plugin offered?"
+
+start
+:Share menu opens;
+:Scan every **metadata.json** in XDG data dirs
+kpackage/Purpose/*/;
+
+!pragma useVerticalIf on
+if (contents/code/main.*\nexists?) then (no)
+    $FAIL:**Skipped**
+    warning: no main file;
+    kill
+elseif (PluginTypes contains\n**Export**?) then (no)
+    $FAIL:**Not offered**;
+    kill
+elseif (All constraints match?\ne.g. exec:python3 on PATH) then (no)
+    $FAIL:**Not offered**;
+    kill
+else (yes)
+    $OK:**Menu entry shown**
+    KPlugin.Name + Icon;
+endif
+stop
+@enduml

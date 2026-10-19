@@ -1,0 +1,40 @@
+@startuml
+!include _style.iuml
+
+title "One upload, step by step"
+hide footbox
+
+actor "You" as U
+participant "Host app" as H
+participant "KDE Purpose" as P
+participant "Plugin" as M
+participant "uguu.se" as S $EXTERNAL
+participant "Plasma\n(D-Bus)" as D
+
+== 1. Start ==
+U -> H : Share › Upload to Uguu
+H -> P : mimeType + file URLs
+P -> P : listen on /tmp/randomname-N
+P -> M : start main.py --server /tmp/randomname-N
+
+== 2. Purpose protocol ==
+M -> P : connect to the socket
+P -> M : request: length line + CBOR map
+M -> M : decode, check dependencies,\nvalidate the file
+M -> P : {"percent": 10}
+
+== 3. Upload (the only network traffic) ==
+M -> S : POST /upload (multipart, field files[])
+S --> M : 200 {"files": [{"url": "https://h.uguu.se/..."}]}
+
+== 4. Result ==
+M -> P : {"percent": 100, "output": {"url": "..."}}
+M -> P : close the socket
+P -> H : job finished: output.url
+
+== 5. After the socket is closed ==
+M -> D : Klipper: setClipboardContents(link)
+M -> D : Notify: "Uploaded to Uguu"
+M -> M : exit 0
+note over H, P : The host app does **not** wait\nfor the clipboard or the notification.
+@enduml

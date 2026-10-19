@@ -1,0 +1,25 @@
+@startuml
+!include _style.iuml
+
+title "The error path"
+
+start
+$FAIL:**Something fails**
+PluginError, or an unexpected exception;
+
+partition "Talk to Purpose" {
+    :Reply **error 100** + errorText;
+    note right
+        The host app shows errorText,
+        if it shows errors at all.
+    end note
+    :Close the socket;
+}
+
+partition "After the socket is closed" {
+    :Critical notification
+    "Uguu upload failed";
+    :exit 1;
+}
+stop
+@enduml
