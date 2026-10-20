@@ -1,0 +1,9 @@
+{
+  "plantuml.diagramsRoot": "docs/diagrams",
+  "plantuml.exportOutDir": "docs/diagrams/out",
+  "plantuml.exportFormat": "svg",
+  "plantuml.exportSubFolder": false,
+  "plantuml.exportIncludeFolderHeirarchy": false,
+  "plantuml.fileExtensions": ".puml,.plantuml",
+  "plantuml.lintDiagramNoName": false
+}

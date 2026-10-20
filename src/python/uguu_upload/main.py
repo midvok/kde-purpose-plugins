@@ -29,7 +29,8 @@ UPLOAD_URL = "https://uguu.se/upload"
 
 
 def upload(path: str) -> str:
-    """Upload a file to uguu.se.
+    """
+    Upload a file to uguu.se.
 
     Uguu replies {"files": [{"url": ...}]} on success, or
     {"description": "<error>"} on failure.
@@ -50,7 +51,9 @@ def upload(path: str) -> str:
 
 
 def main() -> int:
-    """Run the Uguu plugin for one Purpose request.
+    """
+    Run the Uguu plugin for one Purpose request.
+
     Returns:
         The process exit code: 0 on success, 1 on failure.
     """

@@ -44,7 +44,9 @@ CONFIG_DIR = "kde-purpose-plugins"  # under $XDG_CONFIG_HOME
 
 @dataclass
 class Plugin:
-    """Describes one upload plugin.
+    """
+    Describes one upload plugin.
+
     Attributes:
         name:   Service name, shown in notifications (e.g. "Uguu").
         upload: upload(path) -> link; raises PluginError on failure.
@@ -60,7 +62,9 @@ class PluginError(Exception):
 
 
 def require_command(name: str) -> None:
-    """Check that a command is installed.
+    """
+    Check that a command is installed.
+
     Args:
         name: Command to look up on PATH.
     Raises:
@@ -71,7 +75,8 @@ def require_command(name: str) -> None:
 
 
 def require_module(name: str, package: str) -> ModuleType:
-    """Import a module on demand.
+    """
+    Import a module on demand.
 
     Modules are imported here, not at the top: a failed import before
     connect() would crash the host app (see connect).
@@ -100,7 +105,9 @@ def require_module(name: str, package: str) -> ModuleType:
 # stream returned by makefile() is closed too.
 #------------------------------------------------------------------------------
 def connect(server: str) -> BinaryIO:
-    """Connect to the Purpose socket.
+    """
+    Connect to the Purpose socket.
+
     Args:
         server: Path of the Unix socket Purpose listens on.
     Returns:
@@ -116,7 +123,9 @@ def connect(server: str) -> BinaryIO:
 
 
 def read_request(stream: BinaryIO) -> dict[str, Any]:
-    """Read the request ("<length>\\n" + CBOR) from Purpose.
+    """
+    Read the request ("<length>\\n" + CBOR) from Purpose.
+
     Args:
         stream: The Purpose socket stream.
     Returns:
@@ -135,9 +144,11 @@ def read_request(stream: BinaryIO) -> dict[str, Any]:
 
 
 def reply(stream: BinaryIO, **fields: Any) -> None:
-    """Send one JSON line to Purpose, e.g. reply(stream, percent=10).
+    """
+    Send one JSON line to Purpose, e.g. reply(stream, percent=10).
+
     Args:
-        stream: The Purpose socket stream.
+        stream:   The Purpose socket stream.
         **fields: Keys and values of the JSON object.
     """
     stream.write(json.dumps(fields).encode() + b"\n")
@@ -145,7 +156,8 @@ def reply(stream: BinaryIO, **fields: Any) -> None:
 
 
 def cbor_decode(data: bytes) -> Any:
-    """Decode CBOR bytes into Python values.
+    """
+    Decode CBOR bytes into Python values.
 
     Covers what QCborValue::fromJsonValue() emits: definite-length maps and
     arrays, text strings, integers, booleans, null and floats.
@@ -176,7 +188,9 @@ def cbor_decode(data: bytes) -> Any:
 #     its raw bytes are kept for struct.unpack().
 #------------------------------------------------------------------------------
 def cbor_item(data: bytes, pos: int) -> tuple[Any, int]:
-    """Decode one CBOR item.
+    """
+    Decode one CBOR item.
+
     Args:
         data: The CBOR payload.
         pos:  Offset of the item's header byte.
@@ -232,8 +246,8 @@ def cbor_item(data: bytes, pos: int) -> tuple[Any, int]:
 def notify(
     app: str, icon: str, summary: str, body: str, critical: bool = False
 ) -> None:
-    """Show a Plasma notification via the freedesktop Notifications D-Bus API.
-
+    """
+    Show a Plasma notification via the freedesktop Notifications D-Bus API.
     Errors are ignored: a failed notification must not hide the result.
 
     Args:
@@ -268,13 +282,15 @@ def notify(
             ],
             stdout=subprocess.DEVNULL,
             check=False,
-        )  # fmt: skip
+        )
     except OSError:
         pass
 
 
 def copy_to_clipboard(text: str) -> bool:
-    """Copy text to the clipboard via Klipper, which keeps it after we exit.
+    """
+    Copy text to the clipboard via Klipper, which keeps it after we exit.
+
     Args:
         text: Text to copy.
     Returns:
@@ -300,8 +316,8 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 def parse_args(argv: list[str]) -> str:
-    """Parse the command line Purpose starts the plugin with.
-
+    """
+    Parse the command line Purpose starts the plugin with.
     Only --server is used; the other Purpose arguments are ignored.
 
     Args:
@@ -316,14 +332,13 @@ def parse_args(argv: list[str]) -> str:
 
 
 def resolve_path(request: dict[str, Any]) -> str:
-    """Validate the request's single file:// URL.
+    """
+    Validate the request's single file:// URL.
 
     Args:
         request: The decoded Purpose request.
-
     Returns:
         The local path of a readable regular file.
-
     Raises:
         PluginError: If there is not exactly one local, readable file.
     """
@@ -345,14 +360,13 @@ def resolve_path(request: dict[str, Any]) -> str:
 
 
 def read_config(name: str) -> str | None:
-    """Read the first line of a config file.
-
+    """
+    Read the first line of a config file.
     The file is $XDG_CONFIG_HOME/kde-purpose-plugins/<name>
     (~/.config/kde-purpose-plugins/<name> by default).
 
     Args:
         name: Config file name.
-
     Returns:
         The first line, stripped, or None if the file is missing or empty.
     """
@@ -365,24 +379,19 @@ def read_config(name: str) -> str | None:
 
 
 def http_post(
-    url: str,
-    path: str,
-    field: str,
-    data: dict[str, str] | None = None
+    url: str, path: str, field: str, data: dict[str, str] | None = None
 ) -> "requests.Response":
-    """Upload a file as a multipart form field.
-
+    """
+    Upload a file as a multipart form field.
     Network errors become short PluginErrors (requests' own are very long).
 
     Args:
-        url: Upload URL.
-        path: File to upload.
+        url:   Upload URL.
+        path:  File to upload.
         field: Name of the form field that holds the file.
-        data: Extra form fields, e.g. {"reqtype": "fileupload"} (optional).
-
+        data:  Extra form fields, e.g. {"reqtype": "fileupload"} (optional).
     Returns:
         The HTTP response, whatever its status code.
-
     Raises:
         PluginError: If requests is missing or the request fails.
     """
@@ -405,7 +414,9 @@ def http_post(
 
 
 def json_body(resp: "requests.Response") -> dict[str, Any]:
-    """Parse a response body as a JSON object.
+    """
+    Parse a response body as a JSON object.
+
     Args:
         resp: The HTTP response.
     Returns:
@@ -419,7 +430,9 @@ def json_body(resp: "requests.Response") -> dict[str, Any]:
 
 
 def http_error(resp: "requests.Response", detail: str | None = None) -> PluginError:
-    """Build the error for a failed upload response.
+    """
+    Build the error for a failed upload response.
+
     Args:
         resp:   The HTTP response.
         detail: The server's error message, if it gave one.
@@ -432,8 +445,8 @@ def http_error(resp: "requests.Response", detail: str | None = None) -> PluginEr
 
 
 def report_success(plugin: Plugin, path: str, link: str) -> None:
-    """Copy the link and show the success notification.
-
+    """
+    Copy the link and show the success notification.
     Runs after the socket is closed, so the host app never waits for it.
 
     Args:
@@ -466,7 +479,9 @@ def report_success(plugin: Plugin, path: str, link: str) -> None:
 # notification.
 #------------------------------------------------------------------------------
 def report_error(plugin: Plugin, stream: BinaryIO, message: str) -> None:
-    """Report an error to the host app, close the socket, then notify.
+    """
+    Report an error to the host app, close the socket, then notify.
+
     Args:
         plugin:  The plugin that failed.
         stream:  The Purpose socket stream; closed by this function.
@@ -493,7 +508,9 @@ def report_error(plugin: Plugin, stream: BinaryIO, message: str) -> None:
 # stderr (the host app's log / journal).
 #------------------------------------------------------------------------------
 def run(plugin: Plugin) -> int:
-    """Run a plugin for one Purpose request.
+    """
+    Run a plugin for one Purpose request.
+
     Args:
         plugin: The plugin to run.
     Returns:
