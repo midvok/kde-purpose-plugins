@@ -1,11 +1,13 @@
 @startuml
 !include _style.iuml
 
-title "The error path"
-
 start
-$FAIL:**Something fails**
-PluginError, or an unexpected exception;
+$FAIL:**Error during execution**
+(socket already connected);
+note right
+  Must happen after connect();
+  failing earlier crashes host app.
+end note
 
 partition "Talk to Purpose" {
     :Reply **error 100** + errorText;

@@ -4,7 +4,7 @@
 
 - **Purpose**: Scripted Export plugins for **KDE Purpose** (`src/python/` and `src/bash/`), shared Python helpers in `src/python/common/purpose_common.py`.
 - **Install**: Run `./install.sh` after changes. It **_copies_** (never symlinks) `metadata.json`, `main.*`, and `purpose_common.py` into `~/.local/share/kpackage/Purpose/<plugin>/`.
-- **Tests**: Always run tests via `./tests/run.sh` (uses `dbus-run-session` so **Klipper** and **notification** calls hit `tests/mock_dbus.py`, never the live desktop).
+- **Tests**: Always run tests via `./tests/run.sh` (uses local fakes in `tests/fakes/` so uploads, **Klipper**, and **notification** calls never touch the network or live desktop).
 - **KDE Purpose protocol invariants**:
   - Connect to `--server` **Unix socket** first before any code or import that can fail (exiting before connecting crashes the host app).
   - Read the **CBOR** request before running dependency or file checks (closing a socket with unread bytes resets it and drops the error reply).
@@ -15,18 +15,28 @@
 
 ### Structure
 
-- Use H1 only for the document title, once.
+- Use H1 only once for the document title, in Title Case.
 - Use H2–H6 to structure the text.
+- Use sentence case for all other headings (H2–H6), capitalizing only the first word and proper nouns or acronyms.
 - Never number headings (no "1.", "3.5").
 - Never put URLs or links in headings.
 - Never put a divider line `---` before an H2 heading (preview themes usually draw one for H2 headings).
 - Do not insert hard line breaks: keep each paragraph, list item, and table row on one line.
 
-### Wording
+### Wording & explanations
 
 - Short sentences, short paragraphs (2–4 sentences max).
-- Prefer lists and tables over prose.
-- Prefer tables for structured data (fields, messages, errors, comparisons).
+- Explain the rationale: Clarify *why* technologies and architectural choices are used (e.g. why Unix sockets over `stdin`/`stdout`, why boundary strings in HTTP multipart).
+- Concrete examples: Pair non-trivial concepts with minimal, realistic code snippets (Python, Bash, HTTP, ASCII bit diagrams).
+- Prefer lists and tables over prose:
+  - Use tables for dense multi-column structured data (token maps, byte layouts, error catalogs, fields).
+  - Use single-level bullet lists when items require 1–2 explanatory sentences (easier to read than cramped table cells).
+- Link key terms: Link foundational technologies to their canonical Wikipedia articles or RFC specifications in glossaries.
+
+### Code blocks
+
+- Always specify the language tag on fenced code blocks (`python`, `bash`, `http`, `json`, etc.).
+- Keep code examples minimal and focused on the specific mechanism being explained.
 
 ### Emphasis
 
@@ -55,10 +65,15 @@
 - Max line length for code: 88. Long strings and hard-to-break expressions may exceed it.
 - Divider lines (`#---` or `#===`) are exactly 79 characters wide.
 - Comment text inside headers wraps to fit within 88 characters.
+- Add an empty line between `local` variable declarations and the rest of the function code.
+- Add empty lines between distinct conditional statements and logical phases.
+- Add short, meaningful comments inside function bodies where they clarify non-obvious logic, safety guards, or parameter expansions (avoid redundant comments on self-evident code).
 
 ### Script header
 
-- Runnable scripts start with `#!/usr/bin/env bash`, then a header block: name and one-line title, `Description:`, `Usage:` (if applicable), then `Author:` and `Update:`.
+- Runnable scripts start with `#!/usr/bin/env bash`, then a header block: name and one-line title, `Description:`, `Usage:` (if applicable), and `Update:`.
+- `Author:` is added **_only manually by the user_**. The AI must **_never add_** an `Author:` field if missing, and must leave existing `Author:` lines untouched.
+- The AI updates only the `Update:` date field (`Update: YYYY-MM-DD`) when modifying files.
 
 ```bash
 #!/usr/bin/env bash
@@ -82,10 +97,14 @@ set -euo pipefail
 
 ### Usage help
 
-- Scripts that accept arguments have a `usage()` function printing a short help text via heredoc, wired to `-h, --help`.
+- Implement a `usage()` function (wired to `-h, --help` and printing a short help text via heredoc) only when asked for it in the prompt.
+- Place `usage()` near the top of the script (below strict mode and global declarations) so the CLI contract is immediately visible.
 - Help text: one-line summary, `Usage:`, `Commands:` (if any), `Options:`.
 
 ```bash
+#------------------------------------------------------------------------------
+# HELP & USAGE
+#------------------------------------------------------------------------------
 usage() {
     cat <<EOF
 A dotfiles manager wrapping Stow and Rsync for file deployment via symlinks or physical copies.
@@ -109,8 +128,10 @@ EOF
 
 ### Function headers
 
-- Every non-trivial function gets a divider header: a block of `#---` comment lines (79 chars wide) with an uppercase title on the first line, then the description.
-- Simple helper functions get the same divider header but skip the uppercase title line, keeping only the description.
+- Non-trivial functions get a divider header: a block of `#---` comment lines (79 chars wide) with an uppercase title on the first line, then the description.
+- Self-explanatory functions (e.g. `usage()`) use only the divider block and uppercase title, omitting redundant description text.
+- Simple helper functions (e.g. `die()`, `warn()`) do not need individual divider headers. Group related helpers under a shared section divider (e.g. `# HELPERS`), or use an optional single-line `# ...` comment only when explanation is genuinely needed.
+- Place `main()` at the bottom of the script under an `# ENTRY POINT` divider header, followed by `main "$@"`.
 
 ```bash
 #------------------------------------------------------------------------------
@@ -127,6 +148,20 @@ EOF
 #   or not linked.
 #------------------------------------------------------------------------------
 cmd_status() {}
+
+#------------------------------------------------------------------------------
+# HELPERS
+#------------------------------------------------------------------------------
+die() {}
+
+warn() {}
+
+#------------------------------------------------------------------------------
+# ENTRY POINT
+#------------------------------------------------------------------------------
+main() {}
+
+main "$@"
 ```
 
 ## Python Guidelines
@@ -151,6 +186,8 @@ def create_folders(
 - Runnable scripts start with `#!/usr/bin/env python3`.
 - Every script and module has a module docstring.
 - Scripts with a CLI include `Usage:`, `Args:`, and `Examples:` sections.
+- `Author:` is added **_only manually by the user_**. The AI must **_never add_** an `Author:` field if missing, and must leave existing `Author:` lines untouched.
+- The AI updates only the `Update:` date field (`Update: YYYY-MM-DD`) when modifying files.
 
 ```python
 #!/usr/bin/env python3

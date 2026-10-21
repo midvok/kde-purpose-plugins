@@ -2,13 +2,14 @@
 #==============================================================================
 # uguu_upload - KDE Purpose plugin: share a file to uguu.se
 #==============================================================================
-# Usage: main.sh --server SOCKET --pluginType Export --pluginPath PATH
-#        (started by KDE Purpose from a Share menu, not by hand)
-#
 # Description:
 #   Uploads one file to uguu.se (temporary hosting, no account), copies the
 #   link to the clipboard via Klipper and shows a Plasma notification.
 #   Works from any Share > Export menu: Spectacle, Dolphin, Krusader.
+#   Started by KDE Purpose from a Share menu; not meant to be run by hand.
+#
+# Usage:
+#   main.sh --server SOCKET [--pluginType Export] [--pluginPath PATH]
 #
 # Protocol (purpose/src/externalprocess/processjob.cpp):
 #   in  : "<byte count>\n" + CBOR map {"mimeType": ..., "urls": [...]}
@@ -20,53 +21,55 @@
 #
 # Install: ~/.local/share/kpackage/Purpose/uguu_upload/contents/code/main.sh
 #------------------------------------------------------------------------------
-# Update: 2026-10-02
+# Author: midvok
+# Update: 2026-10-22
 #==============================================================================
 
 #------------------------------------------------------------------------------
-# SOCKET
+# CONNECT SOCKET
 #------------------------------------------------------------------------------
-# Connects to the Purpose socket and sets sock_in, sock_out, sock_pid.
+# Connects to the Purpose Unix socket and sets sock_in, sock_out, sock_pid.
 #
-# - Must run before anything can fail: if we exit without connecting,
-#     ProcessJob dereferences a null socket and crashes the host app.
-# - Coproc fds are closed in subshells, so they are moved to ordinary fds.
-#     The originals are closed too, or socat never sees EOF.
-# - socat -t 0.1: Qt never closes its side, so don't wait the default 0.5 s.
+# Step 1: Connect first.
+# - Must connect before any code or command can fail: if the plugin exits
+#   without connecting, ProcessJob dereferences a null socket and crashes
+#   the host app.
+# - Coproc file descriptors are closed in subshells, so they are duplicated
+#   to ordinary descriptors. Originals are closed so socat sees EOF on finish.
+# - socat -t 0.1: Qt never closes its side, so do not wait the default 0.5 s.
 #------------------------------------------------------------------------------
 connect_socket() {
     coproc SOCK { socat -t 0.1 - "UNIX-CONNECT:$server"; }
+
     # shellcheck disable=SC2153  # SOCK_PID is set by coproc
     sock_pid=$SOCK_PID
     local co_in=${SOCK[0]} co_out=${SOCK[1]}
+
     exec {sock_in}<&"$co_in" {sock_out}>&"$co_out"
     exec {co_in}<&- {co_out}>&-
 }
 
-#------------------------------------------------------------------------------
-# Sends one JSON line to Purpose.
-#------------------------------------------------------------------------------
+# Send one JSON line to Purpose.
 reply() {
     printf '%s\n' "$1" >&"$sock_out"
 }
 
-#------------------------------------------------------------------------------
-# Closes the socket and waits for socat to flush the last reply.
-#------------------------------------------------------------------------------
+# Close the socket and wait for socat to flush the last reply.
 finish() {
     exec {sock_out}>&-
     wait "$sock_pid"
 }
 
 #------------------------------------------------------------------------------
-# ERRORS
+# FAIL
 #------------------------------------------------------------------------------
 # Reports an error to the host app and as a notification, then exits.
 #
-# - Error code 100 (KJob::UserDefinedError): Spectacle treats 1 as
-#     "cancelled" and silently drops the message.
-# - Hosts show errors inconsistently (Krusader not at all), hence the
-#     extra notification.
+# Report error with code 100, never 1:
+# - Error code 100 (KJob::UserDefinedError) informs Purpose of failure. Spectacle
+#   treats error code 1 as "cancelled by user" and silently drops the message.
+# - Because host applications display error messages inconsistently (Krusader
+#   suppresses error dialogs), the plugin also triggers a desktop notification.
 #------------------------------------------------------------------------------
 fail() {
     reply "$(jq -nc --arg t "$1" '{error: 100, errorText: $t}')"
@@ -75,53 +78,59 @@ fail() {
     exit 1
 }
 
-#------------------------------------------------------------------------------
-# Fails unless command $1 is installed.
-#------------------------------------------------------------------------------
+# Fail unless command $1 is installed.
 require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but not installed."
 }
 
 #------------------------------------------------------------------------------
-# DESKTOP
+# NOTIFY
 #------------------------------------------------------------------------------
 # Shows a Plasma notification via the freedesktop Notifications D-Bus API.
-#   $1 : icon name
-#   $2 : summary
-#   $3 : body (markup, escape with esc)
+# Errors are ignored: a failed notification must not hide the upload result.
+#
+# Arguments:
+#   $1 : icon name (e.g. "cloud-upload", "dialog-error")
+#   $2 : summary title
+#   $3 : body markup (escape user text with esc)
 #   $4 : "critical" for an urgent notification (optional)
 #
+# D-Bus call details:
+# - Signature 'susssasa{sv}i' argument layout:
+#   app(s), replaces_id(u), icon(s), summary(s), body(s), actions(as),
+#   hints(a{sv}), timeout(i).
 # - "--" stops busctl from parsing the -1 (default timeout) as an option.
+# - Setting urgency = 2 keeps error notifications visible until dismissed.
 #------------------------------------------------------------------------------
 notify() {
     local hints=(0)
+
     [[ ${4-} == critical ]] && hints=(1 urgency y 2)
+
     busctl --user call -- org.freedesktop.Notifications /org/freedesktop/Notifications \
         org.freedesktop.Notifications Notify 'susssasa{sv}i' \
         Uguu 0 "$1" "$2" "$3" 0 "${hints[@]}" -1 >/dev/null
 }
 
-#------------------------------------------------------------------------------
-# Prints $1 escaped for notification markup (e.g. "Tom & Jerry.png").
-#
-# - Replacements are quoted: since bash 5.2 an unquoted & means "the match".
-#------------------------------------------------------------------------------
+# Print $1 escaped for notification markup (e.g. "Tom & Jerry.png").
+# Quoted replacements prevent bash 5.2+ from interpreting '&' as the match.
 esc() {
     local s=${1//&/'&amp;'}
+
     s=${s//</'&lt;'}
     printf '%s' "${s//>/'&gt;'}"
 }
 
-#------------------------------------------------------------------------------
-# Copies $1 to the clipboard via Klipper, which keeps it after we exit.
-#------------------------------------------------------------------------------
+# Copy text to the clipboard via Plasma's Klipper service.
+# Uses D-Bus to communicate with Klipper, which retains clipboard history
+# after the plugin process exits.
 copy_to_clipboard() {
     busctl --user call org.kde.klipper /klipper org.kde.klipper.klipper \
         setClipboardContents s "$1" >/dev/null 2>&1
 }
 
 #------------------------------------------------------------------------------
-# CBOR
+# CBOR DECODER
 #------------------------------------------------------------------------------
 # Minimal CBOR reader over the global byte array "bytes" at index "pos".
 # Covers what QCborValue::fromJsonValue() emits: definite-length maps and
@@ -129,19 +138,32 @@ copy_to_clipboard() {
 #------------------------------------------------------------------------------
 
 #------------------------------------------------------------------------------
-# Reads one item header and sets:
+# CBOR HEAD
+#------------------------------------------------------------------------------
+# Reads one CBOR item header and sets:
 #   major : major type (0 uint, 3 text, 4 array, 5 map, 7 simple/float)
-#   arg   : length, count or value
+#   arg   : length, count, or value
 #
-# - Header byte: top 3 bits = major type, low 5 bits = "additional info".
-#     Info 24..27 means the argument follows in 1, 2, 4 or 8 bytes.
-# - No bit shifts (<<): VS Code mistakes them for heredocs.
+# Header byte layout:
+# - Top 3 bits (b / 32): major type.
+# - Low 5 bits (b % 32): "additional info".
+#
+# Additional info decoding:
+# - 0..23  : argument encoded directly.
+# - 24..27 : argument follows in 1, 2, 4, or 8 bytes (2 ** (ai - 24)).
+# - >27    : indefinite length (never emitted by Qt here).
+#
+# Arithmetic note:
+# - Uses division and modulo instead of bit shifts (<<) so editors do not
+#   mistake them for heredocs.
 #------------------------------------------------------------------------------
 cbor_head() {
     local b=$((bytes[pos++])) ai n
+
     major=$((b / 32))
     ai=$((b % 32))
     arg=$ai
+
     if ((ai >= 24 && ai <= 27)); then
         n=$((2 ** (ai - 24)))
         arg=0
@@ -153,23 +175,25 @@ cbor_head() {
     fi
 }
 
-#------------------------------------------------------------------------------
-# Reads one text string into "str".
-#------------------------------------------------------------------------------
+# Read one text string into global variable "str".
 cbor_str() {
     cbor_head && ((major == 3)) || return 1
     local hex
+
     printf -v hex '\\x%02x' "${bytes[@]:pos:arg}"
     printf -v str %b "$hex"
     ((pos += arg))
 }
 
 #------------------------------------------------------------------------------
+# CBOR SKIP
+#------------------------------------------------------------------------------
 # Skips one item of any type, including nested arrays and maps.
 #------------------------------------------------------------------------------
 cbor_skip() {
     cbor_head || return 1
     local m=$major a=$arg
+
     case $m in
         2 | 3) ((pos += a)) ;;
         4) while ((a--)); do cbor_skip || return 1; done ;;
@@ -179,11 +203,8 @@ cbor_skip() {
     return 0
 }
 
-#------------------------------------------------------------------------------
-# INPUT
-#------------------------------------------------------------------------------
+# Parse the command line Purpose starts the plugin with.
 # Sets "server" from the --server argument; other arguments are ignored.
-#------------------------------------------------------------------------------
 parse_args() {
     server=
     while (($#)); do
@@ -193,23 +214,37 @@ parse_args() {
 }
 
 #------------------------------------------------------------------------------
+# READ PAYLOAD
+#------------------------------------------------------------------------------
 # Reads the CBOR payload from the socket into the byte array "bytes".
+#
+# Step 2: Read request before failing.
+# - The complete request payload must be read before validating dependencies
+#   or input files: closing a socket with unread data resets the connection
+#   and drops the error reply.
+# - Purpose sends "<byte count>\n" followed by the binary CBOR payload.
 #------------------------------------------------------------------------------
 read_payload() {
     local len
+
     read -r len <&"$sock_in"
     mapfile -t bytes < <(head -c "$len" <&"$sock_in" | od -An -v -tu1 -w1)
     ((${#bytes[@]} == len)) || fail "Short read from Purpose (${#bytes[@]}/$len bytes)."
 }
 
 #------------------------------------------------------------------------------
-# Extracts the "urls" array from the payload map into "urls".
+# PARSE URLS
+#------------------------------------------------------------------------------
+# Extracts the "urls" array from the payload map into global array "urls".
 #------------------------------------------------------------------------------
 parse_urls() {
     local keys n
+
     urls=()
     pos=0
+
     cbor_head && ((major == 5)) || fail "Unexpected payload from Purpose."
+
     for ((keys = arg; keys--; )); do
         cbor_str || fail "Unexpected payload from Purpose."
         if [[ $str == urls ]]; then
@@ -225,13 +260,18 @@ parse_urls() {
 }
 
 #------------------------------------------------------------------------------
+# RESOLVE PATH
+#------------------------------------------------------------------------------
 # Validates the single file:// URL and sets "path" to a readable local file.
+# Percent-decodes the path and verifies the file exists and is readable.
 #------------------------------------------------------------------------------
 resolve_path() {
     ((${#urls[@]} == 1)) || fail "Select exactly one file (got ${#urls[@]})."
     [[ ${urls[0]} == file://* ]] || fail "Only local files are supported."
+
     path=${urls[0]#file://}
     printf -v path '%b' "${path//%/\\x}" # percent-decode
+
     [[ -f $path ]] || fail "Not a regular file: $path"
     [[ -r $path ]] || fail "Cannot read $path"
 }
@@ -239,19 +279,24 @@ resolve_path() {
 #------------------------------------------------------------------------------
 # UPLOAD
 #------------------------------------------------------------------------------
-# Uploads "path" to uguu.se and sets "link".
+# Uploads "path" to uguu.se via multipart HTTP POST and sets "link".
 #
-# - The filename is quoted for curl -F, so names with , ; " work.
-# - Uguu replies {"files": [{"url": ...}]} or {"description": "<error>"}.
+# Step 4: Upload file and report progress.
+# - The filename is quoted for curl -F, so names with , ; " work safely.
+# - Uguu replies {"files": [{"url": ...}]} on success, or
+#   {"description": "<error>"} on failure.
 #------------------------------------------------------------------------------
 upload() {
     local p resp code body f err
+
     reply '{"percent": 10}'
     p=${path//\\/\\\\}
     p=${p//\"/\\\"}
+
     resp=$(curl -sS --max-time 60 -w '\n%{http_code}' \
         -F "files[]=@\"$p\"" https://uguu.se/upload) ||
         fail "Upload failed: curl exit code $? (details in the journal)"
+
     code=${resp##*$'\n'}
     body=${resp%$'\n'*}
 
@@ -262,19 +307,27 @@ upload() {
 }
 
 #------------------------------------------------------------------------------
-# Copies the link and shows the success notification.
-# Runs after the socket is closed, so the host app never waits for it.
+# REPORT SUCCESS
+#------------------------------------------------------------------------------
+# Copies the link to Klipper and displays a desktop notification.
+#
+# Step 5: Run slow desktop extras after closing the Purpose socket.
+# - Runs only after closing the Purpose socket so the host application finishes
+#   its task immediately without waiting for D-Bus calls.
 #------------------------------------------------------------------------------
 report_success() {
-    local copied shown
+    local copied filename
+
     if copy_to_clipboard "$link"; then
         copied="Link copied to clipboard."
     else
         copied="Klipper is not running, so the link was <b>not</b> copied."
     fi
-    shown=${path/#"$HOME"/'~'}
+
+    filename=${path##*/}
+
     notify cloud-upload "Uploaded to Uguu" \
-        "<b>$(esc "$shown")</b><br><a href=\"$link\">$link</a><br>$copied Expires in ~3 hours."
+        "<b>$(esc "$filename")</b><br><a href=\"$link\">$link</a><br>$copied Expires in ~3 hours."
 }
 
 #------------------------------------------------------------------------------
@@ -282,13 +335,23 @@ report_success() {
 #------------------------------------------------------------------------------
 main() {
     parse_args "$@"
-    connect_socket # first, see connect_socket
-    require_command busctl
+
+    # Step 1: Establish socket before anything can fail (prevents host app crash)
+    connect_socket
+
+    # Step 2: Read payload before checking dependencies (prevents socket reset)
     read_payload
+
+    # Step 3: Validate dependencies and input file
+    require_command busctl
     parse_urls
     resolve_path
+
+    # Step 4: Upload file and report progress
     upload
     reply "$(jq -nc --arg u "$link" '{percent: 100, output: {url: $u}}')"
+
+    # Step 5: Close socket so host finishes immediately, then notify and copy
     finish
     report_success
 }

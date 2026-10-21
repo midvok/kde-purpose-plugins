@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""
+Test-only fake for busctl (placed first on PATH during tests).
+
+Intercepts D-Bus calls made by the plugins to Klipper (clipboard) and
+freedesktop Notifications, recording each invocation as a JSON line in the
+file specified by $DBUS_LOG.
+
+Environment variables:
+    DBUS_LOG:        Path to the file where JSON call records are appended.
+    FAKE_NO_KLIPPER: If set, Klipper calls fail with exit code 1 to simulate
+                     Klipper not running on the desktop.
+
+Update: 2026-10-20
+"""
+import json
+import os
+import sys
+from typing import Any
+
+
+def log_call(record: dict[str, Any]) -> None:
+    """Append one JSON call record to the file in $DBUS_LOG."""
+    log_path = os.environ.get("DBUS_LOG")
+    if log_path:
+        with open(log_path, "a") as log:
+            log.write(json.dumps(record) + "\n")
+
+
+def main() -> int:
+    """Parse busctl command-line arguments and record the mocked D-Bus call."""
+    args = [arg for arg in sys.argv[1:] if arg not in ("--user", "--")]
+    if len(args) < 5 or args[0] != "call":
+        return 0
+
+    service, method = args[1], args[4]
+
+    # Klipper:
+    #   busctl call org.kde.klipper /klipper <iface> setClipboardContents s <text>
+    if service == "org.kde.klipper" and method == "setClipboardContents":
+        if os.environ.get("FAKE_NO_KLIPPER"):
+            return 1
+        log_call({"method": "setClipboardContents", "text": args[6]})
+        return 0
+
+    # Notifications:
+    #   busctl call org.freedesktop.Notifications <path> <iface> Notify
+    #     susssasa{sv}i <app> <id> <icon> <summary> <body> <actions> <hints> <timeout>
+    if service == "org.freedesktop.Notifications" and method == "Notify":
+        hints = args[12:-1]
+        log_call(
+            {
+                "method": "Notify",
+                "app": args[6],
+                "icon": args[8],
+                "summary": args[9],
+                "body": args[10],
+                "critical": hints == ["1", "urgency", "y", "2"],
+            }
+        )
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

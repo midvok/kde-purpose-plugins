@@ -1,140 +1,347 @@
-# How it works
+# How It Works
 
-This document explains what happens when you pick **Share › Upload to Uguu** in
-Spectacle, Dolphin or Krusader.
+## Foundational technologies
 
-In short:
+Before exploring plugin internals, it helps to understand the underlying Linux, networking, and KDE Plasma mechanisms used by the scripts.
 
-- The host app says which file to share.
-- **KDE Purpose** starts the plugin and talks to it over a **Unix socket**.
-- The plugin **uploads** the file to **Uguu** and gets back a public link.
-- The plugin sends the link to Purpose, copies it to the **clipboard** and
-  shows a **notification**.
-- If anything fails, you get the **error message** as a notification too.
+### Glossary
 
-The plugins are written for **KDE Purpose**, the framework behind every KDE
-Share menu. Purpose has **_no documentation_** for scripted plugins. The
-details below come from its source code (see [References](#references)).
+| Term                                                                                                | Meaning                                                                                                        |
+| :-------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------- |
+| [**KDE Purpose**](https://en.wikipedia.org/wiki/KDE_Frameworks)                                     | The KDE framework behind Share menus that discovers and runs export plugins.                                   |
+| [**KPackage**](https://en.wikipedia.org/wiki/KDE_Frameworks)                                        | KDE's standard packaging format for plugins, consisting of `metadata.json` and a `contents/` directory.        |
+| [**XDG data dirs**](https://en.wikipedia.org/wiki/Freedesktop.org#XDG_Base_Directory_Specification) | Standard Linux data paths where plugins reside, such as `~/.local/share` and `/usr/share`.                     |
+| [**Unix socket**](https://en.wikipedia.org/wiki/Unix_domain_socket)                                 | A bidirectional IPC channel on the local machine used by Purpose to control the plugin process.                |
+| [**JSON**](https://en.wikipedia.org/wiki/JSON)                                                      | Text-based format used for plugin progress, result, and error messages sent back to Purpose.                   |
+| [**CBOR**](https://en.wikipedia.org/wiki/CBOR)                                                      | Concise Binary Object Representation; the binary serialization format Purpose uses to transmit share requests. |
+| [**MIME type**](https://en.wikipedia.org/wiki/Media_type)                                           | Standard file type identifier, such as `image/png`.                                                            |
+| [**Multipart upload**](https://en.wikipedia.org/wiki/MIME#Multipart_messages)                       | Standard HTTP `multipart/form-data` request format used to upload files to web services.                       |
+| [**D-Bus**](https://en.wikipedia.org/wiki/D-Bus)                                                    | The desktop IPC bus used to communicate with notifications and clipboard services.                             |
+| [**busctl**](https://en.wikipedia.org/wiki/Systemd)                                                 | Command-line tool from systemd used to send D-Bus calls without external client libraries.                     |
+| [**Klipper**](<https://en.wikipedia.org/wiki/Klipper_(software)>)                                   | Plasma's clipboard service that retains copied links after the plugin process exits.                           |
 
-## Key terms
+### Local IPC: Unix sockets and CBOR
 
-| Term                 | Meaning                                                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **KDE Purpose**      | The KDE framework behind every Share menu. It finds plugins and runs them.                                                     |
-| **Host app**         | The app whose Share menu you use: Spectacle, Dolphin or Krusader.                                                              |
-| **KPackage**         | KDE's folder format for plugins: a `metadata.json` plus a `contents/` folder.                                                  |
-| **XDG data dirs**    | The standard Linux folders for app data, e.g. `~/.local/share` and `/usr/share`.                                               |
-| **Unix socket**      | A private channel between two programs on the same computer. It works like a network connection, but never leaves the machine. |
-| **JSON**             | A common text format for structured data: `{"key": "value"}`.                                                                  |
-| **CBOR**             | A binary form of JSON. Same structure (maps, lists, text, numbers), but stored as compact bytes instead of text.               |
-| **MIME type**        | A label for the kind of file, e.g. `image/png`.                                                                                |
-| **Multipart upload** | The standard way a browser sends a file in an HTTP request (`multipart/form-data`).                                            |
-| **D-Bus**            | The message system desktop programs use to talk to each other.                                                                 |
-| **busctl**           | A command-line tool (part of systemd) that sends D-Bus messages.                                                               |
-| **Klipper**          | Plasma's clipboard manager. It keeps the clipboard text after the program that set it has exited.                              |
+KDE Purpose controls the plugin process using a private **Unix socket** and exchanges structured requests using **CBOR**.
 
-## The big picture
+#### Unix domain sockets
 
-Five parties are involved. Only one of them, the upload service, is
-**_outside your computer_**.
+A **Unix domain socket** (`AF_UNIX`) is an Inter-Process Communication (IPC) endpoint represented as a file path on the filesystem (typically inside `/tmp/`).
+
+- **Kernel memory transfer**: Unlike network sockets (`AF_INET`), Unix sockets bypass the entire network stack, loopback interface, and port allocation, passing data entirely through OS kernel memory buffers.
+- **Isolated channel**: Standard I/O streams (`stdin` and `stdout`) can be corrupted by stray debug prints, warning messages from imported libraries, or subshell output. A dedicated Unix socket provides a clean, isolated stream.
+- **Filesystem security**: Access is restricted using standard Linux file permissions on the socket file.
+
+```python
+# Server (KDE Purpose) creates and listens on the Unix socket:
+import socket
+
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind("/tmp/randomname-1286082386")
+server.listen(1)
+conn, _ = server.accept()
+
+# Client (Plugin) connects to the socket path passed via --server:
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/randomname-1286082386")
+```
+
+#### CBOR (Concise Binary Object Representation)
+
+**CBOR** (RFC 8949) is a binary data serialization format modeled after JSON.
+
+- **Data model parity**: CBOR supports the same data types as JSON (maps, arrays, text strings, numbers, booleans, and null).
+- **Size comparison**: In payloads consisting mostly of text strings, CBOR and JSON have nearly identical sizes (69 bytes vs 69 characters) because both store strings as raw UTF-8 bytes. CBOR saves significant bandwidth on binary payloads (avoiding base64 overhead), packed numbers, and stripped whitespace.
+- **Parsing speed**: The primary advantage for Qt is streaming binary deserialization: lengths are known before reading bytes, avoiding character escaping and delimiter scanning.
+
+```python
+# Conceptual comparison of JSON vs CBOR payload:
+
+# JSON text representation (69 characters):
+{"mimeType": "image/png", "urls": ["file:///home/user/Pictures/Screenshot.png"]}
+
+# Equivalent CBOR binary representation (69 bytes):
+# a2                                 -> map with 2 entries
+# 68 6d 69 6d 65 54 79 70 65         -> text key "mimeType" (length 8)
+# 69 69 6d 61 67 65 2f 70 6e 67      -> text value "image/png" (length 9)
+# 64 75 72 6c 73                     -> text key "urls" (length 4)
+# 81                                 -> array with 1 item
+# 78 29 66 69 6c 65 3a 2f 2f 2f ...  -> text URL string (length 0x29 = 41)
+```
+
+##### Binary structure and header encoding
+
+Every item in CBOR begins with an 8-bit header byte divided into a major type and additional information:
+
+```
++---------------+-----------------------+
+|  Major type   | Additional information|
+| (bits 7 - 5)  |      (bits 4 - 0)     |
++---------------+-----------------------+
+| 3 bits (0..7) |     5 bits (0..31)    |
++---------------+-----------------------+
+```
+
+- **Major type** (top 3 bits): Defines the data category: `0` (unsigned integer), `1` (negative integer), `2` (byte string), `3` (text string), `4` (array), `5` (map), `6` (semantic tag), or `7` (simple value / float).
+- **Additional information** (low 5 bits): Defines the item's value or byte length:
+  - Values `0` to `23`: Encode the value or length directly within the 5 bits.
+  - Values `24` to `27`: Indicate that the length follows in the next 1 (`24`), 2 (`25`), 4 (`26`), or 8 (`27`) bytes.
+
+For example, the initial byte `0xa2` breaks down into:
+
+- Binary `10100010`: Top 3 bits `101` (decimal `5` = Map), low 5 bits `00010` (decimal `2` = 2 key-value pairs).
+
+| Byte(s)     | Bit breakdown       | Major type      | Length or value | Decoded meaning                                 |
+| :---------- | :------------------ | :-------------- | :-------------- | :---------------------------------------------- |
+| `0xa2`      | `10100010`          | 5 (Map)         | 2               | Map containing 2 key-value pairs                |
+| `0x68`      | `01101000`          | 3 (Text string) | 8               | String of 8 bytes: `"mimeType"`                 |
+| `0x69`      | `01101001`          | 3 (Text string) | 9               | String of 9 bytes: `"image/png"`                |
+| `0x64`      | `01100100`          | 3 (Text string) | 4               | String of 4 bytes: `"urls"`                     |
+| `0x81`      | `10000001`          | 4 (Array)       | 1               | Array containing 1 item                         |
+| `0x78 0x29` | `01111000` + `0x29` | 3 (Text string) | 41 (`0x29`)     | Length follows in next byte: 41-byte URL string |
+
+##### Language support and script trade-offs
+
+KDE Purpose's choice of CBOR reflects its C++ and Qt origins rather than script convenience:
+
+- **C++ (Qt)**: Native support is built directly into Qt (`QCborValue`, `QCborMap`, `QCborStreamReader`). Purpose's C++ `ProcessJob` serializes requests with a single native call with zero external dependencies.
+- **Rust**: Well-supported across the ecosystem via crates like `ciborium` or `serde_cbor`, allowing instant deserialization into typed structs without manual parsing code.
+- **Python**: Standard library includes `json`, but has **_no built-in CBOR module_**. Because plugins cannot require external packages (`cbor2`) before connecting, `purpose_common.py` implements a self-contained 40-line decoder.
+- **Bash**: Standard Linux distributions lack CLI tools for CBOR. `main.sh` extracts raw bytes with `od` and parses headers using pure Bash arithmetic.
+
+For Python and Bash script authors, CBOR requires writing a custom decoder. However, because Purpose only emits definite-length maps, arrays, and strings, a minimal reader requires only ~40 lines of code.
+
+### Network uploads: Multipart HTTP, requests, and curl
+
+Uploading an image or document requires transmitting raw binary bytes alongside form field metadata.
+
+#### Multipart form uploads
+
+Standard HTTP POST requests send a single content type in the body (such as `application/json` or `application/x-www-form-urlencoded`). Binary files cannot be embedded directly in standard text forms without base64 encoding, which adds ~33% bandwidth overhead.
+
+The `multipart/form-data` standard (RFC 7578) solves this by defining a unique **boundary** delimiter string in the `Content-Type` header:
+
+- **Boundary as a separator line**: The boundary is a delimiter string that marks where each part begins and ends inside the HTTP request body.
+- **Random generation**: The HTTP client generates this string randomly (e.g. `974767299852498929531610575`) so it is statistically guaranteed **_never to appear inside the file's binary content_**, preventing premature truncation.
+- **Framing in the HTTP body**:
+  - `--<boundary>`: Prepended with two dashes to mark the start of each part (followed by part headers and content).
+  - `--<boundary>--`: Appended with two trailing dashes to mark the final boundary and end of the entire payload.
+
+```http
+POST /upload HTTP/1.1
+Host: uguu.se
+Content-Type: multipart/form-data; boundary=---------------------------974767299852498929531610575
+
+-----------------------------974767299852498929531610575
+Content-Disposition: form-data; name="files[]"; filename="Screenshot.png"
+Content-Type: image/png
+
+<raw binary bytes of the file>
+-----------------------------974767299852498929531610575--
+```
+
+#### Python requests
+
+The Python implementation uses the `requests` library (`python3-requests`):
+
+- `requests` automatically constructs the multipart boundary header and streams file data in chunks directly from disk.
+- Passing a tuple `(filename, file_handle, mime_type)` assigns the form field metadata without loading the entire file into memory.
+
+```python
+import mimetypes
+import requests
+
+mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+with open(path, "rb") as file_handle:
+    response = requests.post(
+        "https://uguu.se/upload",
+        files={"files[]": ("Screenshot.png", file_handle, mime)},
+        timeout=60,
+    )
+```
+
+#### Bash curl
+
+The standalone Bash implementation (`main.sh`) uses `curl`:
+
+- The `-F` flag instructs `curl` to construct a `multipart/form-data` request.
+- The `@` prefix specifies that the field value should be read from a local file path.
+- Quotes and backslashes in filenames are escaped to ensure safe argument handling.
+
+```bash
+# Escape quotes and backslashes in filename:
+escaped_path=${path//\\/\\\\}
+escaped_path=${escaped_path//\"/\\\"}
+
+# -F sends a multipart/form-data upload:
+response=$(curl -sS --max-time 60 -w '\n%{http_code}' \
+    -F "files[]=@\"$escaped_path\"" \
+    https://uguu.se/upload)
+```
+
+### Desktop integration: D-Bus, busctl, and type signatures
+
+The plugin interacts with the Plasma desktop using **D-Bus**, the standard inter-process messaging system on Linux desktops.
+
+![Desktop IPC via D-Bus](diagrams/out/how-it-works-dbus.svg)
+
+Desktop integration relies on three concepts:
+
+- **D-Bus Session Bus**: A message bus daemon running within your login session (`DBUS_SESSION_BUS_ADDRESS`). Background services like Klipper and the notification server register well-known bus names (such as `org.kde.klipper` and `org.freedesktop.Notifications`) and expose methods at specific object paths.
+- **busctl**: A systemd command-line tool that sends raw D-Bus method calls. Using `busctl` eliminates the need for heavyweight desktop dependencies (like `python-dbus` or Qt bindings), allowing both Python and Bash plugins to communicate with the desktop using built-in system tools.
+- **D-Bus type signatures**: D-Bus is strongly typed. Every method call specifies a signature string detailing the exact data types of its arguments.
+
+#### Demystifying type signatures
+
+When making calls with `busctl`, the command requires a signature string matching the target method:
+
+| Target method                                  | Signature       | Meaning of tokens                                                               |
+| :--------------------------------------------- | :-------------- | :------------------------------------------------------------------------------ |
+| `org.kde.klipper.klipper.setClipboardContents` | `s`             | `s`: single UTF-8 string containing the link URL to store in clipboard history. |
+| `org.freedesktop.Notifications.Notify`         | `susssasa{sv}i` | Detailed below: 8 parameters describing the notification popup.                 |
+
+The `susssasa{sv}i` signature breaks down into these parameter types:
+
+| Token   | Type                                   | Parameter name   | Purpose                                                                                   |
+| :------ | :------------------------------------- | :--------------- | :---------------------------------------------------------------------------------------- |
+| `s`     | `STRING`                               | `app_name`       | Name of the application displayed in the notification header (`"Uguu"`).                  |
+| `u`     | `UINT32`                               | `replaces_id`    | ID of a previous notification to replace (`0` creates a new notification).                |
+| `s`     | `STRING`                               | `app_icon`       | Icon name (`"cloud-upload"` on success, `"dialog-error"` on failure).                     |
+| `s`     | `STRING`                               | `summary`        | Single-line notification title.                                                           |
+| `s`     | `STRING`                               | `body`           | Formatted body text (supports basic HTML tags: `<b>`, `<a>`, `<br>`).                     |
+| `as`    | `ARRAY of STRING`                      | `actions`        | Action buttons (`0` denotes an empty array).                                              |
+| `a{sv}` | `ARRAY of DICT_ENTRY<STRING, VARIANT>` | `hints`          | Metadata dictionary (e.g. `1 urgency y 2` marks failures as critical; `0` denotes empty). |
+| `i`     | `INT32`                                | `expire_timeout` | Duration in milliseconds (`-1` defaults to the desktop setting; `0` never expires).       |
+
+```bash
+# Copy to clipboard via Klipper:
+busctl --user call org.kde.klipper /klipper org.kde.klipper.klipper \
+    setClipboardContents s "https://h.uguu.se/YoTANMRs.png"
+
+# Display desktop notification:
+busctl --user call -- org.freedesktop.Notifications /org/freedesktop/Notifications \
+    org.freedesktop.Notifications Notify susssasa{sv}i \
+    "Uguu" 0 "cloud-upload" "Uploaded to Uguu" "<b>Screenshot.png</b><br>Link copied." \
+    0 0 -1
+```
+
+#### Plasma desktop specifics
+
+Two desktop quirks make this integration necessary:
+
+- **Clipboard persistence**: On X11 and Wayland, the clipboard is owned by the process that copied data. When that process exits, the copied text is lost unless a clipboard manager like **Klipper** claims and retains it.
+- **Notification urgency**: Setting `urgency = 2` ensures error popups remain visible and do not automatically disappear before you read them.
+
+## Plugin architecture and overview
+
+This section explains what happens when you pick **Share › Upload to Uguu** in Spectacle, Dolphin or Krusader.
+
+Scripted export plugins for **KDE Purpose** use a two-tier architecture:
+
+- `purpose_common.py` is the shared protocol engine that handles **Unix socket** IPC, **CBOR** decoding, input validation, **Klipper** clipboard integration, and Plasma desktop **notifications**.
+- `main.py` is the service adapter that defines the upload service endpoint, form fields, and response link extraction.
+
+The repository also includes an equivalent standalone **Bash** implementation (`main.sh`) for lightweight environments.
 
 ![The big picture](diagrams/out/how-it-works-overview.svg)
 
-- **Host app**: offers the Share menu and says which files to share.
-  Spectacle first saves the screenshot to a temporary file.
-- **KDE Purpose**: finds the plugins and starts the chosen one as a separate
-  process. It talks to it over a **Unix socket** (`ProcessJob`).
-- **Plugin**: `main.py` knows the upload service. `purpose_common.py` handles
-  everything else. It runs **_once per share_**, then exits.
-- **Upload service** (uguu.se): stores the file and returns a public link.
-- **Plasma desktop**: shows the **notification** and keeps the link in the
-  **clipboard** (**Klipper**). The plugin reaches it over **D-Bus**.
+Five parties are involved in every share action:
 
-#### Discovery: how the menu entry appears
+- **Host app**: offers the Share menu and passes file URLs to Purpose. Spectacle saves screenshots to a temporary file before sharing.
+- **KDE Purpose**: starts the plugin process and communicates with it over a private **Unix socket** (`ProcessJob`).
+- **Plugin**: runs **_once per share_**, reads the file, uploads it, reports progress to Purpose, copies the link to the clipboard, and triggers a desktop notification.
+- **Upload service** (uguu.se): receives the file over HTTPS and returns a public URL. This is the **_only party outside your computer_**.
+- **Plasma desktop**: displays the desktop **notification** and retains the link in the **Klipper** clipboard history over **D-Bus**.
 
-KDE Purpose rescans its plugin folders **_every time_** a Share menu opens. There is nothing to register and no restart needed.
+## Core protocol invariants
 
-![Discovery: is the plugin offered?](diagrams/out/how-it-works-discovery.svg)
+KDE Purpose has **_no documentation_** for scripted plugins; its protocol details come directly from its C++ source code. Four strict invariants govern the plugin lifecycle:
 
-## Plugin installation
+| Invariant                          | Description                                                                                                   | Consequence if violated                                                                                    |
+| :--------------------------------- | :------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------- |
+| **Connect first**                  | The plugin must connect to the `--server` **Unix socket** before running any code or imports that could fail. | Exiting before connecting causes Purpose to dereference a null pointer, which **_crashes the host app_**.  |
+| **Read request before failing**    | The plugin must read the initial request from the socket before running dependency or file checks.            | Closing a socket that contains unread data resets the connection, and Purpose **_drops the error reply_**. |
+| **Report error 100, never 1**      | Errors reported to Purpose must use error code `100` (`KJob::UserDefinedError`).                              | Spectacle treats error code `1` as **_cancelled by the user_** and silently discards the error message.    |
+| **Slow extras after socket close** | **Klipper** clipboard updates and desktop **notifications** must run only after closing the Purpose socket.   | The host app **_never waits_** for desktop extras; closing the socket finishes the share task immediately. |
 
-Each plugin is a **KPackage** folder in a **Purpose** plugin directory. You
-don't need to build or register anything: **_copying the folder is the whole
-installation_**.
+## Plugin discovery
 
-### Installed layout
+KDE Purpose discovers available plugins dynamically by scanning directories at runtime.
 
-`install.sh` creates this folder for every plugin:
+![Plugin discovery](diagrams/out/how-it-works-discovery.svg)
+
+Discovery follows these rules:
+
+- Purpose rescans its plugin directories **_every time_** a Share menu opens, so new plugins appear immediately without restarting apps.
+- A plugin must contain an executable `contents/code/main.*` file to be recognized.
+- `metadata.json` must include `Export` in `X-Purpose-PluginTypes`.
+- All conditions in `X-Purpose-Constraints` must match (such as verifying `exec:` binaries on `PATH` or filtering supported `mimeType` patterns).
+
+## Plugin structure on disk
+
+Each plugin is structured as a **KPackage** located in a Purpose plugin directory (`~/.local/share/kpackage/Purpose/<plugin_id>/`).
 
 ```
 ~/.local/share/kpackage/Purpose/uguu_upload/
 ├── metadata.json           ← name, icon, plugin type, constraints
 └── contents/code/
-    ├── main.py             ← the executable Purpose starts (must match main.*)
-    └── purpose_common.py   ← shared code, imported by main.py
+    ├── main.py             ← executable Purpose starts (must match main.*)
+    └── purpose_common.py   ← shared helper library imported by main.py
 ```
 
 ### Required files
 
-| File                              | Required | Role                                                                       |
-| --------------------------------- | -------- | -------------------------------------------------------------------------- |
-| `metadata.json`                   | yes      | Describes the plugin: name, icon, plugin type, constraints.                |
-| `contents/code/main.*`            | yes      | The executable Purpose starts. Any extension works (`main.py`, `main.sh`). |
-| `contents/code/purpose_common.py` | Python   | Shared code. It must sit **_next to_** `main.py`.                          |
+| File                              | Required | Role                                                                                  |
+| :-------------------------------- | :------- | :------------------------------------------------------------------------------------ |
+| `metadata.json`                   | yes      | Plugin metadata: unique identifier, menu label, icon, plugin type, and constraints.   |
+| `contents/code/main.*`            | yes      | Executable invoked by Purpose. Any executable extension works (`main.py`, `main.sh`). |
+| `contents/code/purpose_common.py` | Python   | Shared protocol helper. It must reside next to `main.py`.                             |
 
-> [!IMPORTANT]
-> `install.sh` **_copies_** the files instead of linking them. Python resolves
-> a symlinked `main.py` before it looks for imports, so it would not find
-> `purpose_common.py`. Rerun `install.sh` after every change.
+> [!important]
+> Python resolves symlinked scripts before constructing `sys.path`. If `main.py` were a symlink, Python would search for imports in the target directory and fail to import `purpose_common.py`. Plugin files in the installed KPackage directory must be actual file copies.
 
-### The metadata file
+### Metadata configuration
 
-`metadata.json` decides whether and how the plugin appears in the menu:
+The `metadata.json` file controls how the plugin is registered and presented:
 
 ```json
 {
-  "KPlugin": { "Id": "uguu_upload", "Name": "Upload to Uguu (Temporary)", "Icon": "cloud-upload" },
+  "KPlugin": {
+    "Id": "uguu_upload",
+    "Name": "Upload to Uguu (Temporary)",
+    "Icon": "cloud-upload"
+  },
   "X-Purpose-PluginTypes": ["Export"],
   "X-Purpose-Constraints": ["exec:python3"]
 }
 ```
 
-- `Id` **_must be set_**.
-  - Without it, every scripted plugin is called `main`.
-  - Purpose then drops all but one of them as duplicates.
-- `Name` and `Icon` are what you see in the Share menu.
-- `Export` makes it a Share menu plugin.
-- `exec:python3` hides the entry when Python is missing.
-  - That is safer than failing at run time (see
-    [Connect first](#connect-first)).
-- There is no `mimeType` constraint, so the entry appears for **_every file
-  type_**.
+- `Id` **_must be unique_**: without an explicit `Id`, Purpose defaults all scripted plugins to the name `main` and drops duplicates.
+- `Name` and `Icon`: define the label and icon displayed in the Share menu.
+- `X-Purpose-PluginTypes`: must include `Export` to appear in Share menus.
+- `X-Purpose-Constraints`: gates plugin availability. `exec:python3` hides the entry if Python is not installed. Omitting `mimeType` constraints makes the plugin available for all file types.
 
 ## One upload, step by step
 
 ![One upload, step by step](diagrams/out/how-it-works-upload.svg)
 
-The upload runs in five phases:
+Every upload proceeds through five sequential phases:
 
-1. **Start**: Purpose opens a **Unix socket** and starts the plugin.
-2. **Purpose protocol**: the plugin connects, reads the request and reports
-   progress.
-3. **Upload**: one HTTPS request to uguu.se. This is the **_only network
-   traffic_**.
-4. **Result**: the plugin sends the link and closes the socket. Purpose tells
-   the host app the job is done.
-5. **After the socket is closed**: **clipboard** and **notification**. The host
-   app **_never waits_** for them.
+- **Phase 1: Start**: Purpose creates a temporary **Unix socket** in `/tmp/` and starts the plugin process with `--server <socket_path>`.
+- **Phase 2: Purpose protocol**: The plugin connects to the socket, reads and decodes the **CBOR** request, validates dependencies and the input file, and reports initial progress (`{"percent": 10}`).
+- **Phase 3: Upload**: The plugin performs a single HTTPS multipart POST request to the upload service. This is the **_only network traffic_**.
+- **Phase 4: Result**: The plugin sends the completed link (`{"percent": 100, "output": {"url": link}}`) and closes the socket. Purpose signals completion to the host app.
+- **Phase 5: Desktop integration**: After the Purpose socket is closed, the plugin copies the link to **Klipper** and displays a Plasma **notification** via **D-Bus**.
 
 ## The data, message by message
 
-### The Purpose protocol
+### Purpose protocol
 
-All messages in this part stay on your computer.
+All messages in this phase remain entirely on the local machine.
 
-#### Host app → Purpose
+#### Host app to Purpose
 
-The host app describes what to share as a small **JSON** object (`inputData`):
+The host app passes an `inputData` object describing the items to share:
 
 ```json
 {
@@ -143,86 +350,72 @@ The host app describes what to share as a small **JSON** object (`inputData`):
 }
 ```
 
-- Only **_references_** to the file are passed around.
-- Only the plugin reads the file itself.
+Only file references are transferred; only the plugin reads file contents from disk.
 
-#### Purpose → plugin: the command line
+#### Purpose to plugin: command-line arguments
 
-```
-main.py --server /tmp/randomname-1286082386 --pluginType Export --pluginPath …/contents/code/main.py
-```
-
-- Only `--server` matters: it is the **Unix socket** to connect to.
-- The plugin ignores the other two arguments.
-- Nothing arrives on standard input.
-
-#### Purpose → plugin: the request
-
-Purpose sends two things over the socket:
-
-1. The payload size in bytes, as a text line.
-2. The `inputData` from above, encoded as **CBOR**.
+Purpose launches the plugin with three arguments:
 
 ```
-69\n                                       ← payload length in bytes, as text
-a2 68 6d 69 6d 65 54 79 70 65 69 69 6d …   ← 69 bytes of CBOR
+main.py --server /tmp/randomname-1286082386 --pluginType Export --pluginPath .../contents/code/main.py
 ```
 
-> [!NOTE]
-> **CBOR** (Concise Binary Object Representation) stores the same data as
-> JSON, but as bytes instead of text. Each value starts with a small header
-> that says what it is (map, list, text …) and how long it is. Programs can
-> read it without parsing quotes, commas or brackets.
+Only `--server` is required; it provides the **Unix socket** path to connect to. The plugin ignores `--pluginType` and `--pluginPath`.
 
-The complete 69-byte payload, decoded:
+#### Purpose to plugin: socket request
 
-| Bytes              | Meaning                                                                                  |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `a2`               | map with 2 entries                                                                       |
-| `68` + 8 bytes     | text (8): `mimeType`                                                                     |
-| `69` + 9 bytes     | text (9): `image/png`                                                                    |
-| `64` + 4 bytes     | text (4): `urls`                                                                         |
-| `81`               | array with 1 item                                                                        |
-| `78 29` + 41 bytes | text (length in the next byte: `0x29` = 41): `file:///home/user/Pictures/Screenshot.png` |
+Purpose transmits the request over the socket in two parts:
 
-How to read it:
+1. The payload length in bytes, encoded as an ASCII text line ending with `\n`.
+2. The `inputData` structure, encoded as binary **CBOR**.
 
-- Each item starts with a **_header byte_**.
-  - The top 3 bits are the type: 5 = map, 4 = array, 3 = text.
-  - The low 5 bits are the length.
-- Lengths of 24 and up move into the following byte(s). That is why the long
-  URL needs `78 29`.
-- This is **_all_** `cbor_decode()` in `purpose_common.py` has to understand.
+```
+69\n                                       ← payload length in bytes
+a2 68 6d 69 6d 65 54 79 70 65 69 69 6d ...   ← 69 bytes of CBOR data
+```
 
-#### Plugin → Purpose: the replies
+> [!note]
+> Purpose uses Qt's `QCborValue::fromJsonValue().toCbor()` to serialize its internal JSON request map into binary **CBOR**. The structure is always definite-length and maps directly to Python standard types via `cbor_decode()`.
 
-The plugin answers with **_one JSON object per line_**:
+| Bytes              | Decoded structure                                 | Description                        |
+| :----------------- | :------------------------------------------------ | :--------------------------------- |
+| `a2`               | Map of 2 key-value pairs                          | Root request map                   |
+| `68` + 8 bytes     | Text: `mimeType`                                  | Key 1 name                         |
+| `69` + 9 bytes     | Text: `image/png`                                 | Value 1 content                    |
+| `64` + 4 bytes     | Text: `urls`                                      | Key 2 name                         |
+| `81`               | Array of 1 item                                   | URLs array                         |
+| `78 29` + 41 bytes | Text: `file:///home/user/Pictures/Screenshot.png` | Value 2 (`0x29` = 41 bytes length) |
 
-| Line                                                                    | When          | Purpose does                               |
-| ----------------------------------------------------------------------- | ------------- | ------------------------------------------ |
-| `{"percent": 10}`                                                       | upload starts | updates the progress                       |
-| `{"percent": 100, "output": {"url": "https://h.uguu.se/AbCdEf.png"}}`   | success       | stores the link as the job's result        |
-| `{"error": 100, "errorText": "Upload failed (HTTP 413): File too big"}` | failure       | marks the job as failed, with that message |
+#### Plugin to Purpose: status replies
 
-The job ends when the plugin process exits.
+The plugin communicates with Purpose by writing single-line **JSON** objects to the socket:
 
-#### Purpose → host app: the result
+| Reply object                                                            | Timing          | Purpose action                                 |
+| :---------------------------------------------------------------------- | :-------------- | :--------------------------------------------- |
+| `{"percent": 10}`                                                       | Upload begins   | Updates the task progress indicator            |
+| `{"percent": 100, "output": {"url": "https://h.uguu.se/AbCdEf.png"}}`   | Upload succeeds | Stores the link as the job result              |
+| `{"error": 100, "errorText": "Upload failed (HTTP 413): File too big"}` | Upload fails    | Marks the job as failed with the error message |
 
-| Result                 | Spectacle                                                  | Dolphin, Krusader                          |
-| ---------------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| success (`output.url`) | shows nothing: the plugin's notification is the feedback   | Purpose opens the link in the browser      |
-| error (`errorText`)    | inline message: _There was a problem sharing the image: …_ | depends on the app, Krusader shows nothing |
+The job ends as soon as the plugin closes the socket.
 
-The plugin's own **notification** **_always appears_**, whatever the host app
-does.
+#### Purpose to host app: outcome handling
+
+Host applications handle job completion differently:
+
+| Host app                   | On success (`output.url`)                                           | On error (`errorText`)                                                  |
+| :------------------------- | :------------------------------------------------------------------ | :---------------------------------------------------------------------- |
+| **Spectacle**              | Remains silent; the plugin's desktop notification provides feedback | Displays an inline banner: _There was a problem sharing the image: ..._ |
+| **Dolphin** / **Krusader** | Opens the returned link directly in the default web browser         | Varies by application; Krusader suppresses error dialogs                |
+
+The plugin's own desktop **notification** **_always appears_**, ensuring consistent feedback across all host applications.
 
 ### The upload
 
-This is the only part that goes over the network.
+This is the only operation that transmits data over the network.
 
-#### Plugin → Uguu: the request
+#### Plugin to service: request
 
-A single HTTPS request, a standard **multipart upload** like a browser sends:
+A standard HTTPS `multipart/form-data` POST request:
 
 ```http
 POST /upload HTTP/1.1
@@ -234,17 +427,15 @@ Content-Type: multipart/form-data; boundary=a1b2c3
 Content-Disposition: form-data; name="files[]"; filename="Screenshot.png"
 Content-Type: image/png
 
-<the file's bytes>
+<file content bytes>
 --a1b2c3--
 ```
 
-- The file's **MIME type** (`Content-Type`) is guessed from its name.
-- Filenames with characters like `"` are encoded safely by `requests`
-  (as `%22`).
+The file's **MIME type** is inferred from its filename extension, defaulting to `application/octet-stream`.
 
-#### Uguu → plugin: the response
+#### Service to plugin: response
 
-Success (HTTP 200):
+Success response (HTTP 200):
 
 ```json
 {
@@ -263,139 +454,97 @@ Success (HTTP 200):
 }
 ```
 
-The plugin only uses `files[0].url`.
+The plugin extracts `files[0].url`.
 
-Failure (e.g. HTTP 413):
+Failure response (e.g. HTTP 413):
 
 ```json
 { "success": false, "errorcode": 413, "description": "File too big" }
 ```
 
-- The plugin turns this into the **error message**
-  `Upload failed (HTTP 413): File too big`.
-- If the body is not JSON (e.g. an HTML error page), the message ends with
-  `unexpected response` instead.
+The plugin formats this into `Upload failed (HTTP 413): File too big`. Non-JSON server responses fall back to `Upload failed (HTTP <status>): unexpected response`.
 
-### The desktop
+### Desktop integration
 
-Both calls below are **D-Bus** messages sent with **busctl**. Since busctl is
-part of systemd, **_no extra packages_** are needed.
+Both desktop integration calls use **D-Bus** messages sent via **busctl**. Because `busctl` is included with systemd, no external D-Bus libraries are required.
 
 #### Clipboard
 
-The link goes to **Klipper**, which keeps it after the plugin exits:
+The link is sent to **Klipper**, which preserves clipboard contents after the plugin process exits:
 
-| Service           | Object     | Method                 | Argument |
-| ----------------- | ---------- | ---------------------- | -------- |
-| `org.kde.klipper` | `/klipper` | `setClipboardContents` | the link |
+| Service           | Object path | Method                 | Parameter             |
+| :---------------- | :---------- | :--------------------- | :-------------------- |
+| `org.kde.klipper` | `/klipper`  | `setClipboardContents` | The returned link URL |
 
 #### Notification
 
-The **notification** uses the standard freedesktop interface that Plasma
-implements:
+Notifications use the standard freedesktop Notifications interface implemented by Plasma:
 
-| Argument | Value                                                           |
-| -------- | --------------------------------------------------------------- |
-| app name | `Uguu`                                                          |
-| icon     | `cloud-upload` (`dialog-error` on failure)                      |
-| summary  | `Uploaded to Uguu` / `Uguu upload failed`                       |
-| body     | file path, clickable link, clipboard status (or the error text) |
-| hints    | `urgency = 2` (critical) on failure, none on success            |
-| timeout  | `-1` = Plasma's default                                         |
+| Parameter | Value                                                                |
+| :-------- | :------------------------------------------------------------------- |
+| App name  | `Uguu`                                                               |
+| Icon      | `cloud-upload` on success, `dialog-error` on failure                 |
+| Summary   | `Uploaded to Uguu` or `Uguu upload failed`                           |
+| Body      | Formatted HTML with local path, clickable link, and clipboard status |
+| Hints     | `urgency = 2` (critical) on failure, none on success                 |
+| Timeout   | `-1` (Plasma default)                                                |
 
-> [!TIP]
-> Plasma files notifications from apps without a desktop file under
-> _Other applications_. To keep them in the history after the popup closes,
-> enable _Show in history_ for Other applications in
-> System Settings › Notifications.
+> [!tip]
+> Notifications from CLI tools without desktop entries appear under _Other applications_ in Plasma. To preserve them in notification history after popups close, enable _Show in history_ for Other applications in System Settings › Notifications.
 
-## Errors
+## Error handling
 
-Every failure takes the **_same path_**:
+All failures follow a single consistent path:
 
-- The host app gets the **error message**.
-- You get it too, as a **notification**, whether or not the host app shows it.
+- The error is captured after establishing the **Unix socket** connection.
+- An error object (`{"error": 100, "errorText": "..."}`) is sent over the socket to inform Purpose and the host app.
+- The socket is closed.
+- A critical Plasma desktop **notification** is displayed.
+- The plugin exits with status code `1`.
 
 ![The error path](diagrams/out/how-it-works-errors.svg)
 
-### The four rules
+### Common error messages
 
-> [!IMPORTANT]
-> Four rules from Purpose's source shape `run()`. Breaking any of them makes
-> the share fail badly. Each one is covered by a test case.
-
-#### Connect first
-
-- If the plugin exits without ever connecting, Purpose uses a socket that
-  does not exist (a null pointer). **_The host app crashes._**
-- So nothing that could fail runs before `connect()`. Not even importing
-  `requests`.
-
-#### Read the request before anything can fail
-
-- Closing a **Unix socket** that still holds unread data **_resets_** it.
-- Purpose then loses the **error message**.
-- So dependency checks run after `read_request()`.
-
-#### Error code 100, never 1
-
-- Spectacle treats code 1 as **_cancelled by the user_** and silently drops
-  the message.
-- 100 is KDE's "user-defined error".
-
-#### Slow extras after closing
-
-- **Clipboard** and **notification** run after the socket is closed.
-- So the host app **_never waits_** for them.
-
-### Error messages
-
-| Error text                                                        | Typical cause                                                                                                            |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `File not found: /tmp/Spectacle.…/…png`                           | Spectacle shared from the region selection before Accept ([KDE bug 525554](https://bugs.kde.org/show_bug.cgi?id=525554)) |
-| `Not a regular file: …`                                           | a folder was shared                                                                                                      |
-| `Select exactly one file (got N).`                                | several files selected                                                                                                   |
-| `Python module 'requests' is required: install python3-requests.` | missing dependency                                                                                                       |
-| `'busctl' is required but not installed.`                         | missing dependency (systemd)                                                                                             |
-| `Upload failed: cannot connect to uguu.se.`                       | offline, DNS, firewall                                                                                                   |
-| `Upload timed out after 60 s.`                                    | slow network or large file                                                                                               |
-| `Upload failed (HTTP 413): File too big`                          | the service's own error message                                                                                          |
-| `Internal error: …`                                               | a bug, with the full traceback in the host app's log                                                                     |
+| Error text                                                        | Cause                                                                                                                       |
+| :---------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| `File not found: /tmp/Spectacle..../...png`                       | Spectacle shared a region selection before clicking Accept ([KDE bug 525554](https://bugs.kde.org/show_bug.cgi?id=525554)). |
+| `Not a regular file: ...`                                         | A directory was selected instead of a file.                                                                                 |
+| `Select exactly one file (got N).`                                | Multiple files were selected for a single-file plugin.                                                                      |
+| `Python module 'requests' is required: install python3-requests.` | The `requests` Python package is missing.                                                                                   |
+| `'busctl' is required but not installed.`                         | `busctl` binary is not found on `PATH`.                                                                                     |
+| `Upload failed: cannot connect to uguu.se.`                       | Network offline, DNS failure, or firewall blocking the connection.                                                          |
+| `Upload timed out after 60 s.`                                    | Slow network connection or large file exceeding timeout.                                                                    |
+| `Upload failed (HTTP 413): File too big`                          | File size exceeds service upload limits.                                                                                    |
+| `Internal error: ...`                                             | Unhandled exception; traceback is printed to standard error (host app log).                                                 |
 
 ## What leaves your computer
 
-- Only the [upload request](#plugin--uguu-the-request) goes over the network.
-- Everything else **_stays local_**: the **Unix socket** is local, and
-  **D-Bus** goes to your own session.
+Only the upload request leaves your machine. The **Unix socket** IPC and **D-Bus** calls remain strictly local.
 
-| Sent to uguu.se                                                                | Not sent                                     |
-| ------------------------------------------------------------------------------ | -------------------------------------------- |
-| the file's content                                                             | the full path, other files                   |
-| the file's name, e.g. `Screenshot.png`                                         | any account, key or cookie (Uguu needs none) |
-| its MIME type, guessed from the name                                           | your clipboard or notifications              |
-| your IP address and `python-requests` as User-Agent (part of any HTTP request) |                                              |
+| Sent to upload service                      | Kept strictly local                                          |
+| :------------------------------------------ | :----------------------------------------------------------- |
+| File content bytes                          | Full local file paths and unshared files                     |
+| File basename (e.g. `Screenshot.png`)       | User credentials, tokens, or cookies (service requires none) |
+| MIME type inferred from filename            | Clipboard contents and notification history                  |
+| IP address and `python-requests` User-Agent | Host application details                                     |
 
-> [!WARNING]
-> The link is **_public_**.
->
-> - Anyone who has the link can open the file.
-> - It stays online until Uguu deletes it, a few hours after the upload.
-> - **_Don't share anything private_** this way.
+> [!warning]
+> Uploaded links are **_public_**. Anyone with the link can view the file until the service deletes it (typically within a few hours). **_Never share sensitive or private files_** through temporary hosting services.
 
 ## References
 
-All in the KDE Purpose source
-([invent.kde.org/frameworks/purpose](https://invent.kde.org/frameworks/purpose)):
+KDE Purpose implementation details from the [KDE Purpose repository](https://invent.kde.org/frameworks/purpose):
 
-| File                                               | What it shows                                                          |
-| -------------------------------------------------- | ---------------------------------------------------------------------- |
-| `src/alternativesmodel.cpp`                        | discovery of `kpackage/Purpose/*/metadata.json`, constraint checks     |
-| `src/helper.cpp`                                   | the `contents/code/main.*` lookup                                      |
-| `src/externalprocess/processjob.cpp`               | the socket protocol, CBOR request, JSON replies, the null-socket crash |
-| `src/fileitemactionplugin/sharefileitemaction.cpp` | Dolphin / Krusader integration, opening the link                       |
+| Source file                                        | Relevant functionality                                                                 |
+| :------------------------------------------------- | :------------------------------------------------------------------------------------- |
+| `src/alternativesmodel.cpp`                        | Discovery of `kpackage/Purpose/*/metadata.json` and constraint checks                  |
+| `src/helper.cpp`                                   | Executable lookup for `contents/code/main.*`                                           |
+| `src/externalprocess/processjob.cpp`               | Socket lifecycle, CBOR request transmission, JSON reply parsing, and null-socket crash |
+| `src/fileitemactionplugin/sharefileitemaction.cpp` | Dolphin and Krusader menu integration and automatic link browser launch                |
 
-And in Spectacle
-([invent.kde.org/graphics/spectacle](https://invent.kde.org/graphics/spectacle)):
+Spectacle Share menu implementation details from the [KDE Spectacle repository](https://invent.kde.org/graphics/spectacle):
 
-- `src/Gui/ExportMenu.cpp` handles the Share menu.
-- It treats error code 1 as cancelled.
+| Source file              | Relevant functionality                                                   |
+| :----------------------- | :----------------------------------------------------------------------- |
+| `src/Gui/ExportMenu.cpp` | Share menu construction and treating error code `1` as user cancellation |

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#==============================================================================
+# curl - Test-only fake curl for the Bash plugin (placed first on PATH)
+#==============================================================================
+# Description:
+# - Intercepts upload requests from main.sh so tests never touch the network.
+# - Parses the multipart file upload flag (-F) to verify file readability
+#   and logs the uploaded filename to $FAKE_LOG for test assertions.
+# - Simulates HTTP response bodies, HTTP status codes, and network error codes
+#   matching the active $FAKE mode ("ok", "big", "html", "down", "slow").
+#
+# Interaction with main.sh:
+# - main.sh invokes:
+#     curl -sS --max-time 60 -w '\n%{http_code}' -F "files[]=@\"$p\"" <url>
+# - It splits the response into body and HTTP code:
+#     code=${resp##*$'\n'}
+#     body=${resp%$'\n'*}
+#
+#------------------------------------------------------------------------------
+# Update: 2026-10-20
+#==============================================================================
+
+# Bash strict mode
+set -euo pipefail
+
+#------------------------------------------------------------------------------
+# 1. PARSE UPLOADED FILE ARGUMENT
+#------------------------------------------------------------------------------
+# main.sh escapes backslashes and double quotes in $p before building the
+# argument: -F "files[]=@\"$p\"". This loop finds that argument, strips the
+# field=@" prefix and trailing quote, and reverses the escape sequences to
+# recover the exact local file path.
+#------------------------------------------------------------------------------
+file=""
+for arg; do
+    if [[ $arg == *=@\"*\" ]]; then
+        file=${arg#*=@\"}
+        file=${file%\"}
+        file=${file//\\\"/\"}
+        file=${file//\\\\/\\}
+    fi
+done
+
+#------------------------------------------------------------------------------
+# 2. VALIDATE FILE READABILITY
+#------------------------------------------------------------------------------
+# Real curl fails with error 26 (CURLE_READ_ERROR) if the specified upload file
+# does not exist or lacks read permissions. We emulate that exact behavior.
+#------------------------------------------------------------------------------
+if [[ ! -r $file ]]; then
+    echo "curl: (26) Failed to open/read local data from file" >&2
+    exit 26
+fi
+
+#------------------------------------------------------------------------------
+# 3. RECORD UPLOAD METADATA FOR ASSERTIONS
+#------------------------------------------------------------------------------
+# Appends a JSON line containing the uploaded file basename to $FAKE_LOG.
+# test_plugins.py checks this file to verify that filenames with special
+# characters (spaces, quotes, HTML markup) were passed without corruption.
+#------------------------------------------------------------------------------
+jq -nc --arg n "${file##*/}" '{name: $n}' >> "$FAKE_LOG"
+
+#------------------------------------------------------------------------------
+# 4. EMULATE SERVER RESPONSE / NETWORK STATUS
+#------------------------------------------------------------------------------
+# main.sh uses -w '\n%{http_code}', expecting the response body followed by
+# a newline and the HTTP status code on the final line.
+#
+# Modes:
+#   ok   : HTTP 200 with standard Uguu JSON response containing file URL
+#   big  : HTTP 413 JSON error simulating server file-size rejection
+#   html : HTTP 503 non-JSON HTML page simulating server over-capacity
+#   down : Exit code 6 (CURLE_COULDNT_RESOLVE_HOST) simulating offline/DNS failure
+#   slow : Exit code 28 (CURLE_OPERATION_TIMEDOUT) simulating request timeout
+#------------------------------------------------------------------------------
+case $FAKE in
+    ok)   printf '%s\n200' '{"success": true, "files": [{"url": "https://h.uguu.se/AbCdEf.png"}]}' ;;
+    big)  printf '%s\n413' '{"success": false, "errorcode": 413, "description": "File too big"}' ;;
+    html) printf '%s\n503' '<html>over capacity</html>' ;;
+    down) echo "curl: (6) Could not resolve host: uguu.se" >&2; exit 6 ;;
+    slow) echo "curl: (28) Operation timed out" >&2; exit 28 ;;
+esac

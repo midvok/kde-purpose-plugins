@@ -15,7 +15,7 @@ Dependencies:
     busctl    checked at runtime (part of systemd)
 
 Author: midvok
-Update: 2026-10-18
+Update: 2026-10-21
 """
 import argparse
 import html
@@ -98,8 +98,10 @@ def require_module(name: str, package: str) -> ModuleType:
 
 
 #------------------------------------------------------------------------------
-# Must run before anything can fail: if the plugin exits without connecting,
-# ProcessJob dereferences a null socket and crashes the host app.
+# Step 1: Connect first.
+#
+# Must connect before any code or import can fail: if the plugin exits without
+# connecting, ProcessJob dereferences a null socket and crashes the host app.
 #
 # Closing `sock` right away is safe: the connection stays open until the
 # stream returned by makefile() is closed too.
@@ -122,6 +124,13 @@ def connect(server: str) -> BinaryIO:
     return stream
 
 
+#------------------------------------------------------------------------------
+# Step 2: Read request before failing.
+#
+# The complete request payload must be read before validating dependencies
+# or input files: closing a socket with unread data resets the connection
+# and drops the error reply.
+#------------------------------------------------------------------------------
 def read_request(stream: BinaryIO) -> dict[str, Any]:
     """
     Read the request ("<length>\\n" + CBOR) from Purpose.
@@ -259,6 +268,9 @@ def notify(
     """
     hints = ["1", "urgency", "y", "2"] if critical else ["0"]
     try:
+        # Signature 'susssasa{sv}i' argument layout:
+        # app(s), replaces_id(u), icon(s), summary(s), body(s), actions(as),
+        # hints(a{sv}), timeout(i).
         # "--" stops busctl from parsing the -1 (default timeout) as an option.
         subprocess.run(
             [
@@ -289,7 +301,10 @@ def notify(
 
 def copy_to_clipboard(text: str) -> bool:
     """
-    Copy text to the clipboard via Klipper, which keeps it after we exit.
+    Copy text to the clipboard via Plasma's Klipper service.
+
+    Uses D-Bus to communicate with Klipper, which retains clipboard history
+    after the plugin process exits.
 
     Args:
         text: Text to copy.
@@ -311,7 +326,7 @@ def copy_to_clipboard(text: str) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
-    )  # fmt: skip
+    )
     return result.returncode == 0
 
 
@@ -444,39 +459,47 @@ def http_error(resp: "requests.Response", detail: str | None = None) -> PluginEr
     )
 
 
+#------------------------------------------------------------------------------
+# Step 5: Run slow desktop extras after closing the Purpose socket.
+#
+# Copies the link to Klipper and displays a desktop notification. Runs only
+# after closing the Purpose socket so the host application finishes its task
+# immediately without waiting for D-Bus calls.
+#------------------------------------------------------------------------------
 def report_success(plugin: Plugin, path: str, link: str) -> None:
     """
     Copy the link and show the success notification.
-    Runs after the socket is closed, so the host app never waits for it.
 
     Args:
         plugin: The plugin that uploaded the file.
         path:   Local path of the uploaded file.
         link:   Public link returned by the service.
     """
-    home = os.path.expanduser("~")
-    shown = "~" + path[len(home):] if path.startswith(home + "/") else path
+    filename = os.path.basename(path)
 
     if copy_to_clipboard(link):
         copied = "Link copied to clipboard."
     else:
         copied = "Klipper is not running, so the link was <b>not</b> copied."
+
     notify(
         plugin.name,
         "cloud-upload",
         f"Uploaded to {plugin.name}",
-        f"<b>{html.escape(shown, quote=False)}</b><br>"
+        f"<b>{html.escape(filename, quote=False)}</b><br>"
         f'<a href="{html.escape(link)}">{html.escape(link)}</a><br>'
         f"{copied} {plugin.note}".rstrip(),
     )
 
 
 #------------------------------------------------------------------------------
-# Error code 100 (KJob::UserDefinedError): Spectacle treats 1 as "cancelled"
-# and silently drops the message.
+# Report error with code 100, never 1.
 #
-# Hosts show errors inconsistently (Krusader not at all), hence the extra
-# notification.
+# Error code 100 (KJob::UserDefinedError) informs Purpose of failure. Spectacle
+# treats error code 1 as "cancelled by user" and silently drops the message.
+#
+# Because host applications display error messages inconsistently (Krusader
+# suppresses error dialogs), the plugin also triggers a desktop notification.
 #------------------------------------------------------------------------------
 def report_error(plugin: Plugin, stream: BinaryIO, message: str) -> None:
     """
@@ -499,13 +522,15 @@ def report_error(plugin: Plugin, stream: BinaryIO, message: str) -> None:
 
 
 #------------------------------------------------------------------------------
-# The steps below must happen in this exact order:
-# 1. connect() — establish the socket before anything else can fail.
-# 2. read_request() — read the request immediately; closing a socket with
-#    unread data resets it and the host app loses the error reply.
+# Protocol execution flow:
+# Step 1. Connect socket first.
+# Step 2. Read request payload before any failure checks.
+# Step 3. Validate runtime dependencies and file path.
+# Step 4. Upload file and report progress/result.
+# Step 5. Close socket immediately, then handle clipboard and notification.
 #
-# Unexpected exceptions are reported like PluginError, with the traceback on
-# stderr (the host app's log / journal).
+# Unexpected exceptions are caught and reported as error 100, with full
+# tracebacks printed to stderr for debugging via journalctl / host logs.
 #------------------------------------------------------------------------------
 def run(plugin: Plugin) -> int:
     """
@@ -516,23 +541,32 @@ def run(plugin: Plugin) -> int:
     Returns:
         The process exit code: 0 on success, 1 on failure.
     """
+    # Step 1: Establish socket before anything can fail (prevents host app crash)
     stream = connect(parse_args(sys.argv[1:]))
     try:
+        # Step 2: Read payload before checking dependencies (prevents socket reset)
         request = read_request(stream)
+
+        # Step 3: Validate dependencies and input file
         require_command("busctl")
         require_module("requests", "python3-requests")
         path = resolve_path(request)
+
+        # Step 4: Upload file and report progress
         reply(stream, percent=10)
         link = plugin.upload(path)
         reply(stream, percent=100, output={"url": link})
+
     except PluginError as e:
         report_error(plugin, stream, str(e))
         return 1
+
     except Exception as e:
         traceback.print_exc()
         report_error(plugin, stream, f"Internal error: {e}")
         return 1
 
+    # Step 5: Close socket so host finishes immediately, then notify and copy
     stream.close()
     report_success(plugin, path, link)
     return 0

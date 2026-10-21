@@ -1,7 +1,6 @@
 @startuml
 !include _style.iuml
 
-title "One upload, step by step"
 hide footbox
 
 actor "You" as U
@@ -31,6 +30,10 @@ S --> M : 200 {"files": [{"url": "https://h.uguu.se/..."}]}
 M -> P : {"percent": 100, "output": {"url": "..."}}
 M -> P : close the socket
 P -> H : job finished: output.url
+note over H
+  **Dolphin / Krusader:** opens link in browser
+  **Spectacle:** waits for plugin notification
+end note
 
 == 5. After the socket is closed ==
 M -> D : Klipper: setClipboardContents(link)

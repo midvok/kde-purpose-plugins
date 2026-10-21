@@ -1,0 +1,20 @@
+@startuml
+!include _style.iuml
+
+hide footbox
+
+participant "Plugin\n(busctl)" as P
+participant "D-Bus Session Bus\ndaemon" as B
+participant "Klipper\norg.kde.klipper" as K
+participant "Notifications\norg.freedesktop.Notifications" as N
+
+== Clipboard ==
+P -> B : call setClipboardContents(link)\nsignature: 's'
+B -> K : routes to /klipper
+K --> P : return
+
+== Notification ==
+P -> B : call Notify(app, id, icon, title, body, actions, hints, timeout)\nsignature: 'susssasa{sv}i'
+B -> N : routes to /org/freedesktop/Notifications
+N --> P : return notification ID (uint32)
+@enduml

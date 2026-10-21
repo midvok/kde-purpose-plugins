@@ -19,7 +19,7 @@ Examples:
         --pluginPath ~/.local/share/kpackage/Purpose/uguu_upload/contents/code/main.py
 
 Author: midvok
-Update: 2026-10-18
+Update: 2026-10-21
 """
 import sys
 

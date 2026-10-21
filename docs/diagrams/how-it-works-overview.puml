@@ -1,15 +1,12 @@
 @startuml
 !include _style.iuml
 
-title "The big picture"
-' left to right direction
-
 actor "You" as user
 
 package "Your computer" {
     rectangle "**Host app**\nSpectacle · Dolphin · Krusader" as host
     rectangle "**KDE Purpose**\nstarts the plugin" as purpose
-    rectangle "**Plugin**\nmain.py" as plugin
+    rectangle "**Plugin**\nmain.py + common" as plugin
     file "**The file**" as file
     rectangle "**Plasma desktop**\nNotifications · Klipper" as plasma
 }
@@ -18,11 +15,13 @@ cloud "**uguu.se**\nupload service" as service
 
 user --> host : 1. Share › Upload to Uguu
 host --> purpose : 2. file URLs
-purpose --> plugin : 3. request (CBOR)
-plugin --> file : 4. reads
-plugin --> service : 5. upload (HTTPS)
-service --> plugin : 6. link (JSON)
-plugin --> purpose : 7. link or error (JSON)
-purpose --> host : 8. link or error
-plugin --> plasma : 9. clipboard +\nnotification (D-Bus)
+purpose --> plugin : 3. starts plugin process
+plugin --> purpose : 4. connects to Unix socket
+purpose --> plugin : 5. request (CBOR)
+plugin --> file : 6. reads
+plugin --> service : 7. upload (HTTPS)
+service --> plugin : 8. link (JSON)
+plugin --> purpose : 9. link or error (JSON)
+purpose --> host : 10. link or error
+plugin --> plasma : 11. clipboard +\nnotification (D-Bus)
 @enduml

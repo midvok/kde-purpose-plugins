@@ -5,7 +5,5 @@
         "Icon": "cloud-upload"
     },
     "X-Purpose-PluginTypes": [ "Export" ],
-    "X-Purpose-Constraints": [
-        "exec:python3"
-    ]
+    "X-Purpose-Constraints": [ "exec:python3" ]
 }

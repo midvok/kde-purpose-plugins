@@ -1,8 +1,6 @@
 @startuml
 !include _style.iuml
 
-title "Discovery: is the plugin offered?"
-
 start
 :Share menu opens;
 :Scan every **metadata.json** in XDG data dirs
@@ -16,7 +14,7 @@ if (contents/code/main.*\nexists?) then (no)
 elseif (PluginTypes contains\n**Export**?) then (no)
     $FAIL:**Not offered**;
     kill
-elseif (All constraints match?\ne.g. exec:python3 on PATH) then (no)
+elseif (All constraints match?\ne.g. exec:python3, mimeTypes) then (no)
     $FAIL:**Not offered**;
     kill
 else (yes)
