@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-KDE Purpose plugin that uploads one file to uguu.se (temporary hosting, no
-account) and shares the link. KDE Purpose starts it from a Share menu; it is
-not meant to be run by hand.
+KDE Purpose plugin that uploads one file to **uguu.se** (temporary hosting, no
+account) and shares the link.
+
+KDE Purpose starts it from a Share menu; it is not meant to be run by hand.
 
 purpose_common.py must sit next to this file (install.sh copies it).
 

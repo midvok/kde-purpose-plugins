@@ -1,0 +1,9 @@
+{
+    "KPlugin": {
+        "Id": "catbox_upload",
+        "Name": "Upload to Catbox (Permanent)",
+        "Icon": "cloud-upload"
+    },
+    "X-Purpose-PluginTypes": [ "Export" ],
+    "X-Purpose-Constraints": [ "exec:python3" ]
+}

@@ -19,7 +19,7 @@ Examples:
     ./tests/run.sh
     ./tests/run.sh -v
 
-Update: 2026-10-21
+Update: 2026-10-22
 """
 import json
 import os
@@ -35,7 +35,9 @@ from typing import Any
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_DIR = TESTS_DIR.parent
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
+
 UGUU_LINK = "https://h.uguu.se/AbCdEf.png"
+CATBOX_LINK = "https://files.catbox.moe/AbCdEf.png"
 
 
 @dataclass
@@ -44,13 +46,14 @@ class Case:
     Describe one end-to-end plugin test case.
 
     Attributes:
-        name:       Short human-readable description of the scenario.
-        files:      Request URLs (relative to fixture HOME if no scheme is given).
-        expect:     Expected output URL on success, or expected error substring.
-        fake:       Upload fake mode ("ok", "big", "html", "down", "slow").
-        notify:     Substring expected inside the desktop notification body.
-        upload:     Expected metadata fields logged by the upload fake.
-        no_klipper: If True, simulate Klipper not running on the desktop.
+        name:         Short human-readable description of the scenario.
+        files:        Request URLs (relative to fixture HOME if no scheme is given).
+        expect:       Expected output URL on success, or expected error substring.
+        fake:         Upload fake mode ("ok", "big", "html", "down", "slow").
+        notify:       Substring expected inside the desktop notification body.
+        upload:       Expected metadata fields logged by the upload fake.
+        no_klipper:   If True, simulate Klipper not running on the desktop.
+        config_files: Mapping of relative paths under ~/.config to file contents.
     """
     name: str
     files: list[str]
@@ -59,6 +62,7 @@ class Case:
     notify: str = ""
     upload: dict[str, Any] = field(default_factory=dict)
     no_klipper: bool = False
+    config_files: dict[str, str] = field(default_factory=dict)
 
     @property
     def expects_success(self) -> bool:
@@ -86,7 +90,7 @@ def build_cases(offline_error: str) -> list[Case]:
             "standard upload (%20 in path)",
             [SHOT],
             UGUU_LINK,
-            notify="<b>Screenshot_20261002_101500.png</b>",
+            notify="Screenshot_20261002_101500.png",
         ),
         Case(
             "special chars and HTML markup",
@@ -127,6 +131,87 @@ def build_cases(offline_error: str) -> list[Case]:
             "Klipper not running",
             [SHOT],
             UGUU_LINK,
+            notify="<b>not</b> copied",
+            no_klipper=True,
+        ),
+    ]
+
+
+def build_catbox_cases(offline_error: str) -> list[Case]:
+    """
+    Build the test suite for the Catbox plugin implementation.
+
+    Args:
+        offline_error: Expected error substring when the network is down.
+    Returns:
+        List of test cases covering anonymous and account upload paths.
+    """
+    return [
+        Case(
+            "anonymous upload (%20 in path)",
+            [SHOT],
+            CATBOX_LINK,
+            notify="Uploaded anonymously.",
+            upload={
+                "field": "fileToUpload",
+                "data": {
+                    "reqtype": "fileupload"
+                },
+            },
+        ),
+        Case(
+            "account upload with userhash",
+            [SHOT],
+            CATBOX_LINK,
+            notify="Uploaded to your account.",
+            config_files={"kde-purpose-plugins/catbox_userhash": "secret_hash\n"},
+            upload={
+                "field": "fileToUpload",
+                "data": {
+                    "reqtype": "fileupload",
+                    "userhash": "secret_hash"
+                },
+            },
+        ),
+        Case(
+            "special chars and HTML markup",
+            [SPECIAL_URL],
+            CATBOX_LINK,
+            notify='a &lt;b&gt; &amp; "c".png',
+            upload={"name": SPECIAL_FILE},
+        ),
+        Case(
+            "server rejects upload (HTTP 413)",
+            [SHOT],
+            "(HTTP 413): File too big",
+            fake="big",
+        ),
+        Case(
+            "non-JSON server error (HTTP 503)",
+            [SHOT],
+            "(HTTP 503): unexpected response",
+            fake="html",
+        ),
+        Case(
+            "network failure (offline)",
+            [SHOT],
+            offline_error,
+            fake="down",
+        ),
+        Case(
+            "invalid input (multiple files)",
+            [SHOT, SHOT],
+            "exactly one file (got 2)",
+        ),
+        Case(
+            "invalid input (directory)",
+            ["a%20folder"],
+            "Not a regular file",
+        ),
+        Case(
+            "Klipper not running",
+            [SHOT],
+            CATBOX_LINK,
             notify="<b>not</b> copied",
             no_klipper=True,
         ),
@@ -336,7 +421,19 @@ def check_case(case: Case, main_script: str, root: Path, home: Path) -> list[str
     request = {"mimeType": "application/octet-stream", "urls": urls}
     env = build_case_env(case, home, fake_log, dbus_log)
 
-    replies, code, stderr = run_plugin(main_script, request, env, root)
+    created_configs: list[Path] = []
+    for rel_path, content in case.config_files.items():
+        conf_path = home / ".config" / rel_path
+        conf_path.parent.mkdir(parents=True, exist_ok=True)
+        conf_path.write_text(content)
+        created_configs.append(conf_path)
+
+    try:
+        replies, code, stderr = run_plugin(main_script, request, env, root)
+    finally:
+        for conf_path in created_configs:
+            conf_path.unlink(missing_ok=True)
+
     uploads = read_json_lines(fake_log)
     dbus_calls = read_json_lines(dbus_log)
     final_reply = replies[-1] if replies else {}
@@ -460,6 +557,14 @@ def main() -> int:
                 ["--bash"],
                 "uguu_upload",
                 build_cases("curl exit code 6"),
+                root,
+                home,
+            ),
+            run_suite(
+                "python",
+                [],
+                "catbox_upload",
+                build_catbox_cases("cannot connect to catbox.moe"),
                 root,
                 home,
             ),

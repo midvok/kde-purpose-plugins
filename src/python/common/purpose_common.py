@@ -15,7 +15,7 @@ Dependencies:
     busctl    checked at runtime (part of systemd)
 
 Author: midvok
-Update: 2026-10-21
+Update: 2026-10-22
 """
 import argparse
 import html
@@ -486,7 +486,7 @@ def report_success(plugin: Plugin, path: str, link: str) -> None:
         plugin.name,
         "cloud-upload",
         f"Uploaded to {plugin.name}",
-        f"<b>{html.escape(filename, quote=False)}</b><br>"
+        f"{html.escape(filename, quote=False)}<br>"
         f'<a href="{html.escape(link)}">{html.escape(link)}</a><br>'
         f"{copied} {plugin.note}".rstrip(),
     )

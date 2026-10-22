@@ -327,7 +327,7 @@ report_success() {
     filename=${path##*/}
 
     notify cloud-upload "Uploaded to Uguu" \
-        "<b>$(esc "$filename")</b><br><a href=\"$link\">$link</a><br>$copied Expires in ~3 hours."
+        "$(esc "$filename")<br><a href=\"$link\">$link</a><br>$copied Expires in ~3 hours."
 }
 
 #------------------------------------------------------------------------------

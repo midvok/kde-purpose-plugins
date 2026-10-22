@@ -36,6 +36,11 @@ RESPONSES: dict[str, dict[str, tuple[int, Any]]] = {
         ),
         "html": (503, "<html>over capacity</html>"),
     },
+    "catbox.moe": {
+        "ok": (200, "https://files.catbox.moe/AbCdEf.png"),
+        "big": (413, "File too big"),
+        "html": (503, "<html>over capacity</html>"),
+    },
 }
 
 if os.environ.get("FAKE"):
