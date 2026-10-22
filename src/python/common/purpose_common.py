@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 TIMEOUT = 60  # seconds, per upload
 CONFIG_DIR = "kde-purpose-plugins"  # under $XDG_CONFIG_HOME
+USER_AGENT = "kde-purpose-plugins/1.0 (KDE Plasma)"
 
 
 @dataclass
@@ -416,7 +417,11 @@ def http_post(
     try:
         with open(path, "rb") as file:
             return requests.post(
-                url, data=data, files={field: (name, file, mime)}, timeout=TIMEOUT
+                url,
+                data=data,
+                files={field: (name, file, mime)},
+                headers={"User-Agent": USER_AGENT},
+                timeout=TIMEOUT,
             )
     except requests.Timeout:
         raise PluginError(f"Upload timed out after {TIMEOUT} s.") from None

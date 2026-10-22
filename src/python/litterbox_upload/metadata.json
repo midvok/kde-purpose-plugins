@@ -1,0 +1,9 @@
+{
+    "KPlugin": {
+        "Id": "litterbox_upload",
+        "Name": "Upload to Litterbox (Temporary)",
+        "Icon": "cloud-upload"
+    },
+    "X-Purpose-PluginTypes": [ "Export" ],
+    "X-Purpose-Constraints": [ "exec:python3" ]
+}

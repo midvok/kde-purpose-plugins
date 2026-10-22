@@ -41,6 +41,37 @@ RESPONSES: dict[str, dict[str, tuple[int, Any]]] = {
         "big": (413, "File too big"),
         "html": (503, "<html>over capacity</html>"),
     },
+    "litterbox.catbox.moe": {
+        "ok": (200, "https://litter.catbox.moe/AbCdEf.png"),
+        "big": (413, "File too big"),
+        "html": (503, "<html>over capacity</html>"),
+    },
+    "api.imgbb.com": {
+        "ok": (
+            200,
+            {
+                "data": {
+                    "url": "https://i.ibb.co/AbCdEf/image.png",
+                    "display_url": "https://i.ibb.co/AbCdEf/image.png",
+                    "delete_url": "https://ibb.co/AbCdEf/delete123",
+                },
+                "success": True,
+                "status": 200,
+            },
+        ),
+        "big": (
+            413,
+            {
+                "status_code": 413,
+                "error": {
+                    "message": "File too big",
+                    "code": 100,
+                },
+                "status_txt": "Payload Too Large",
+            },
+        ),
+        "html": (503, "<html>over capacity</html>"),
+    },
 }
 
 if os.environ.get("FAKE"):

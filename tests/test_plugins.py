@@ -38,6 +38,8 @@ VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
 
 UGUU_LINK = "https://h.uguu.se/AbCdEf.png"
 CATBOX_LINK = "https://files.catbox.moe/AbCdEf.png"
+LITTERBOX_LINK = "https://litter.catbox.moe/AbCdEf.png"
+IMGBB_LINK = "https://i.ibb.co/AbCdEf/image.png"
 
 
 @dataclass
@@ -218,6 +220,167 @@ def build_catbox_cases(offline_error: str) -> list[Case]:
     ]
 
 
+def build_litterbox_cases(offline_error: str) -> list[Case]:
+    """
+    Build the test suite for the Litterbox plugin implementation.
+
+    Args:
+        offline_error: Expected error substring when the network is down.
+    Returns:
+        List of test cases covering default and configured expiry upload paths.
+    """
+    return [
+        Case(
+            "standard upload (default 72h expiry)",
+            [SHOT],
+            LITTERBOX_LINK,
+            notify="Expires in 72h.",
+            upload={
+                "field": "fileToUpload",
+                "data": {"reqtype": "fileupload", "time": "72h"},
+            },
+        ),
+        Case(
+            "custom expiry (24h configured)",
+            [SHOT],
+            LITTERBOX_LINK,
+            notify="Expires in 24h.",
+            config_files={"kde-purpose-plugins/litterbox_expiry": "24h\n"},
+            upload={
+                "field": "fileToUpload",
+                "data": {"reqtype": "fileupload", "time": "24h"},
+            },
+        ),
+        Case(
+            "special chars and HTML markup",
+            [SPECIAL_URL],
+            LITTERBOX_LINK,
+            notify='a &lt;b&gt; &amp; "c".png',
+            upload={"name": SPECIAL_FILE},
+        ),
+        Case(
+            "server rejects upload (HTTP 413)",
+            [SHOT],
+            "(HTTP 413): File too big",
+            fake="big",
+        ),
+        Case(
+            "non-JSON server error (HTTP 503)",
+            [SHOT],
+            "(HTTP 503): unexpected response",
+            fake="html",
+        ),
+        Case(
+            "network failure (offline)",
+            [SHOT],
+            offline_error,
+            fake="down",
+        ),
+        Case(
+            "invalid input (multiple files)",
+            [SHOT, SHOT],
+            "exactly one file (got 2)",
+        ),
+        Case(
+            "invalid input (directory)",
+            ["a%20folder"],
+            "Not a regular file",
+        ),
+        Case(
+            "Klipper not running",
+            [SHOT],
+            LITTERBOX_LINK,
+            notify="<b>not</b> copied",
+            no_klipper=True,
+        ),
+    ]
+
+
+def build_imgbb_cases(offline_error: str) -> list[Case]:
+    """
+    Build the test suite for the ImgBB plugin implementation.
+
+    Args:
+        offline_error: Expected error substring when the network is down.
+    Returns:
+        List of test cases covering key validation, image upload, and error paths.
+    """
+    cfg = {"kde-purpose-plugins/imgbb_api_key": "secret_key\n"}
+    return [
+        Case(
+            "missing API key",
+            [SHOT],
+            "API key missing",
+        ),
+        Case(
+            "standard upload with API key (%20 in path)",
+            [SHOT],
+            IMGBB_LINK,
+            notify="Permanent upload.",
+            config_files=cfg,
+            upload={
+                "field": "image",
+                "data": {"key": "secret_key"},
+            },
+        ),
+        Case(
+            "special chars and HTML markup",
+            [SPECIAL_URL],
+            IMGBB_LINK,
+            notify='a &lt;b&gt; &amp; "c".png',
+            config_files=cfg,
+            upload={"name": SPECIAL_FILE},
+        ),
+        Case(
+            "invalid input (non-image file)",
+            ["Documents/notes.txt"],
+            "ImgBB only accepts image files",
+            config_files=cfg,
+        ),
+        Case(
+            "server rejects upload (HTTP 413)",
+            [SHOT],
+            "(HTTP 413): File too big",
+            fake="big",
+            config_files=cfg,
+        ),
+        Case(
+            "non-JSON server error (HTTP 503)",
+            [SHOT],
+            "(HTTP 503): unexpected response",
+            fake="html",
+            config_files=cfg,
+        ),
+        Case(
+            "network failure (offline)",
+            [SHOT],
+            offline_error,
+            fake="down",
+            config_files=cfg,
+        ),
+        Case(
+            "invalid input (multiple files)",
+            [SHOT, SHOT],
+            "exactly one file (got 2)",
+            config_files=cfg,
+        ),
+        Case(
+            "invalid input (directory)",
+            ["a%20folder"],
+            "Not a regular file",
+            config_files=cfg,
+        ),
+        Case(
+            "Klipper not running",
+            [SHOT],
+            IMGBB_LINK,
+            notify="<b>not</b> copied",
+            no_klipper=True,
+            config_files=cfg,
+        ),
+    ]
+
+
 #------------------------------------------------------------------------------
 # CBOR ENCODING
 #------------------------------------------------------------------------------
@@ -352,11 +515,15 @@ def make_fixture_home(root: Path) -> Path:
     sample_files = [
         "Pictures/My Shots/Screenshot_20261002_101500.png",
         SPECIAL_FILE,
+        "Documents/notes.txt",
     ]
     for rel_path in sample_files:
         full_path = home / rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_bytes(b"\x89PNG fake image data")
+        if rel_path.endswith(".txt"):
+            full_path.write_text("fake text notes\n")
+        else:
+            full_path.write_bytes(b"\x89PNG fake image data")
     (home / "a folder").mkdir()
     return home
 
@@ -565,6 +732,22 @@ def main() -> int:
                 [],
                 "catbox_upload",
                 build_catbox_cases("cannot connect to catbox.moe"),
+                root,
+                home,
+            ),
+            run_suite(
+                "python",
+                [],
+                "litterbox_upload",
+                build_litterbox_cases("cannot connect to litterbox.catbox.moe"),
+                root,
+                home,
+            ),
+            run_suite(
+                "python",
+                [],
+                "imgbb_upload",
+                build_imgbb_cases("cannot connect to api.imgbb.com"),
                 root,
                 home,
             ),

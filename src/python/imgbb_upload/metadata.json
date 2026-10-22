@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "imgbb_upload",
+        "Name": "Upload to ImgBB (Permanent)",
+        "Icon": "cloud-upload"
+    },
+    "X-Purpose-PluginTypes": [ "Export" ],
+    "X-Purpose-Constraints": [
+        "exec:python3",
+        "mimeType:image/*"
+    ]
+}
