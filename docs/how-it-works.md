@@ -1,5 +1,25 @@
 # How It Works
 
+- [How It Works](#how-it-works)
+  - [Foundational technologies](#foundational-technologies)
+    - [Glossary](#glossary)
+    - [Local IPC: Unix sockets and CBOR](#local-ipc-unix-sockets-and-cbor)
+    - [Network uploads: Multipart HTTP, requests, and curl](#network-uploads-multipart-http-requests-and-curl)
+    - [Desktop integration: D-Bus, busctl, and type signatures](#desktop-integration-d-bus-busctl-and-type-signatures)
+  - [Plugin architecture](#plugin-architecture)
+    - [Overview and components](#overview-and-components)
+    - [Core protocol invariants](#core-protocol-invariants)
+    - [Plugin discovery](#plugin-discovery)
+    - [Plugin structure on disk](#plugin-structure-on-disk)
+  - [Execution and implementation details](#execution-and-implementation-details)
+    - [Step-by-step workflow](#step-by-step-workflow)
+    - [Purpose protocol](#purpose-protocol)
+    - [Upload procedure](#upload-procedure)
+    - [Desktop integration](#desktop-integration)
+    - [Error handling](#error-handling)
+  - [What leaves your computer](#what-leaves-your-computer)
+  - [References](#references)
+
 ## Foundational technologies
 
 Before exploring plugin internals, it helps to understand the underlying Linux, networking, and KDE Plasma mechanisms used by the scripts.
@@ -140,26 +160,6 @@ Content-Type: image/png
 -----------------------------974767299852498929531610575--
 ```
 
-#### Python requests
-
-The Python implementation uses the `requests` library (`python3-requests`):
-
-- `requests` automatically constructs the multipart boundary header and streams file data in chunks directly from disk.
-- Passing a tuple `(filename, file_handle, mime_type)` assigns the form field metadata without loading the entire file into memory.
-
-```python
-import mimetypes
-import requests
-
-mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-with open(path, "rb") as file_handle:
-    response = requests.post(
-        "https://uguu.se/upload",
-        files={"files[]": ("Screenshot.png", file_handle, mime)},
-        timeout=60,
-    )
-```
-
 #### Bash curl
 
 The standalone Bash implementation (`main.sh`) uses `curl`:
@@ -175,9 +175,43 @@ escaped_path=${escaped_path//\"/\\\"}
 
 # -F sends a multipart/form-data upload:
 response=$(curl -sS --max-time 60 -w '\n%{http_code}' \
+    -A "kde-purpose-plugins/1.0 (KDE Plasma)" \
     -F "files[]=@\"$escaped_path\"" \
     https://uguu.se/upload)
 ```
+
+#### Python requests
+
+The Python implementation uses the `requests` library (`python3-requests`):
+
+- `requests` automatically constructs the multipart boundary header and streams file data in chunks directly from disk.
+- Passing a tuple `(filename, file_handle, mime_type)` assigns the form field metadata without loading the entire file into memory.
+
+```python
+import mimetypes
+import requests
+
+USER_AGENT = "kde-purpose-plugins/1.0 (KDE Plasma)"
+
+mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+with open(path, "rb") as file_handle:
+    response = requests.post(
+        "https://uguu.se/upload",
+        files={"files[]": ("Screenshot.png", file_handle, mime)},
+        headers={"User-Agent": USER_AGENT},
+        timeout=60,
+    )
+```
+
+#### User-Agent identification and anti-bot filtering
+
+Web hosting services and Content Delivery Networks (CDNs) often deploy anti-bot protections to prevent automated abuse and scraper spam.
+
+- **Default Python User-Agent blocking**: During Catbox plugin development, uploads failed because the service and Cloudflare reverse proxies reject Python's default User-Agent (`python-requests/2.x.x`) with HTTP 403 or HTML challenge pages.
+- **Browser spoofing vs explicit identification**: Setting a browser identity (`Mozilla/5.0 ...`) worked as an initial workaround, but the project standardizes on explicit, transparent client identification.
+- **Project identifier**: The shared library `purpose_common.py` declares `USER_AGENT = "kde-purpose-plugins/1.0 (KDE Plasma)"` and passes it on all outgoing HTTP requests.
+
+For full endpoint specifications, form field structures, and response schemas of every service, see [Supported Upload Services](upload-services.md).
 
 ### Desktop integration: D-Bus, busctl, and type signatures
 
@@ -232,16 +266,18 @@ Two desktop quirks make this integration necessary:
 - **Clipboard persistence**: On X11 and Wayland, the clipboard is owned by the process that copied data. When that process exits, the copied text is lost unless a clipboard manager like **Klipper** claims and retains it.
 - **Notification urgency**: Setting `urgency = 2` ensures error popups remain visible and do not automatically disappear before you read them.
 
-## Plugin architecture and overview
+## Plugin architecture
 
-This section explains what happens when you pick **Share › Upload to Uguu** in Spectacle, Dolphin or Krusader.
+This section explains the design, discovery, packaging, and execution contracts that govern scripted export plugins for KDE Purpose.
+
+### Overview and components
 
 Scripted export plugins for **KDE Purpose** use a two-tier architecture:
 
 - `purpose_common.py` is the shared protocol engine that handles **Unix socket** IPC, **CBOR** decoding, input validation, **Klipper** clipboard integration, and Plasma desktop **notifications**.
 - `main.py` is the service adapter that defines the upload service endpoint, form fields, and response link extraction.
 
-The repository also includes an equivalent standalone **Bash** implementation (`main.sh`) for lightweight environments.
+Currently, all production plugins in the repository are implemented in **Python**. A standalone **Bash** implementation (`main.sh`) is also provided as a dependency-free example. While compiled implementations in **C++** or **Rust** are technically possible, they require installing dedicated build toolchains and compiling binaries from source. The scripted approach was deliberately chosen to simplify deployment—installation is a direct file copy—and keep dependencies strictly minimal.
 
 ![The big picture](diagrams/out/how-it-works-overview.svg)
 
@@ -250,10 +286,10 @@ Five parties are involved in every share action:
 - **Host app**: offers the Share menu and passes file URLs to Purpose. Spectacle saves screenshots to a temporary file before sharing.
 - **KDE Purpose**: starts the plugin process and communicates with it over a private **Unix socket** (`ProcessJob`).
 - **Plugin**: runs **_once per share_**, reads the file, uploads it, reports progress to Purpose, copies the link to the clipboard, and triggers a desktop notification.
-- **Upload service** (uguu.se): receives the file over HTTPS and returns a public URL. This is the **_only party outside your computer_**.
+- **Upload service** (e.g. Uguu, Catbox, Litterbox, ImgBB): receives the file over HTTPS and returns a public URL. This is the **_only party outside your computer_**.
 - **Plasma desktop**: displays the desktop **notification** and retains the link in the **Klipper** clipboard history over **D-Bus**.
 
-## Core protocol invariants
+### Core protocol invariants
 
 KDE Purpose has **_no documentation_** for scripted plugins; its protocol details come directly from its C++ source code. Four strict invariants govern the plugin lifecycle:
 
@@ -264,7 +300,7 @@ KDE Purpose has **_no documentation_** for scripted plugins; its protocol detail
 | **Report error 100, never 1**      | Errors reported to Purpose must use error code `100` (`KJob::UserDefinedError`).                              | Spectacle treats error code `1` as **_cancelled by the user_** and silently discards the error message.    |
 | **Slow extras after socket close** | **Klipper** clipboard updates and desktop **notifications** must run only after closing the Purpose socket.   | The host app **_never waits_** for desktop extras; closing the socket finishes the share task immediately. |
 
-## Plugin discovery
+### Plugin discovery
 
 KDE Purpose discovers available plugins dynamically by scanning directories at runtime.
 
@@ -277,7 +313,7 @@ Discovery follows these rules:
 - `metadata.json` must include `Export` in `X-Purpose-PluginTypes`.
 - All conditions in `X-Purpose-Constraints` must match (such as verifying `exec:` binaries on `PATH` or filtering supported `mimeType` patterns).
 
-## Plugin structure on disk
+### Plugin structure on disk
 
 Each plugin is structured as a **KPackage** located in a Purpose plugin directory (`~/.local/share/kpackage/Purpose/<plugin_id>/`).
 
@@ -289,7 +325,7 @@ Each plugin is structured as a **KPackage** located in a Purpose plugin director
     └── purpose_common.py   ← shared helper library imported by main.py
 ```
 
-### Required files
+#### Required files
 
 | File                              | Required | Role                                                                                  |
 | :-------------------------------- | :------- | :------------------------------------------------------------------------------------ |
@@ -300,7 +336,7 @@ Each plugin is structured as a **KPackage** located in a Purpose plugin director
 > [!important]
 > Python resolves symlinked scripts before constructing `sys.path`. If `main.py` were a symlink, Python would search for imports in the target directory and fail to import `purpose_common.py`. Plugin files in the installed KPackage directory must be actual file copies.
 
-### Metadata configuration
+#### Metadata configuration
 
 The `metadata.json` file controls how the plugin is registered and presented:
 
@@ -321,7 +357,11 @@ The `metadata.json` file controls how the plugin is registered and presented:
 - `X-Purpose-PluginTypes`: must include `Export` to appear in Share menus.
 - `X-Purpose-Constraints`: gates plugin availability. `exec:python3` hides the entry if Python is not installed. Omitting `mimeType` constraints makes the plugin available for all file types.
 
-## One upload, step by step
+## Execution and implementation details
+
+This section traces the full execution lifecycle of an upload from the initial menu click to the final desktop notification.
+
+### Step-by-step workflow
 
 ![One upload, step by step](diagrams/out/how-it-works-upload.svg)
 
@@ -332,8 +372,6 @@ Every upload proceeds through five sequential phases:
 - **Phase 3: Upload**: The plugin performs a single HTTPS multipart POST request to the upload service. This is the **_only network traffic_**.
 - **Phase 4: Result**: The plugin sends the completed link (`{"percent": 100, "output": {"url": link}}`) and closes the socket. Purpose signals completion to the host app.
 - **Phase 5: Desktop integration**: After the Purpose socket is closed, the plugin copies the link to **Klipper** and displays a Plasma **notification** via **D-Bus**.
-
-## The data, message by message
 
 ### Purpose protocol
 
@@ -364,27 +402,17 @@ Only `--server` is required; it provides the **Unix socket** path to connect to.
 
 #### Purpose to plugin: socket request
 
-Purpose transmits the request over the socket in two parts:
+Purpose transmits the request over the socket in two sequential parts:
 
-1. The payload length in bytes, encoded as an ASCII text line ending with `\n`.
-2. The `inputData` structure, encoded as binary **CBOR**.
+1. **Payload length**: An ASCII integer indicating the byte count, followed by a newline (`\n`).
+2. **CBOR payload**: The binary `inputData` structure of exactly that length.
 
 ```
-69\n                                       ← payload length in bytes
-a2 68 6d 69 6d 65 54 79 70 65 69 69 6d ...   ← 69 bytes of CBOR data
+69\n                                       ← payload length in bytes (ASCII)
+a2 68 6d 69 6d 65 54 79 70 65 69 69 6d ...   ← 69 bytes of binary CBOR
 ```
 
-> [!note]
-> Purpose uses Qt's `QCborValue::fromJsonValue().toCbor()` to serialize its internal JSON request map into binary **CBOR**. The structure is always definite-length and maps directly to Python standard types via `cbor_decode()`.
-
-| Bytes              | Decoded structure                                 | Description                        |
-| :----------------- | :------------------------------------------------ | :--------------------------------- |
-| `a2`               | Map of 2 key-value pairs                          | Root request map                   |
-| `68` + 8 bytes     | Text: `mimeType`                                  | Key 1 name                         |
-| `69` + 9 bytes     | Text: `image/png`                                 | Value 1 content                    |
-| `64` + 4 bytes     | Text: `urls`                                      | Key 2 name                         |
-| `81`               | Array of 1 item                                   | URLs array                         |
-| `78 29` + 41 bytes | Text: `file:///home/user/Pictures/Screenshot.png` | Value 2 (`0x29` = 41 bytes length) |
+The plugin reads the ASCII length line, reads that exact number of bytes from the socket, and passes them to `cbor_decode()`. This reconstructs the dictionary matching the host app's `inputData` object without external library dependencies (see [Binary structure and header encoding](#binary-structure-and-header-encoding) for the detailed byte breakdown).
 
 #### Plugin to Purpose: status replies
 
@@ -409,29 +437,17 @@ Host applications handle job completion differently:
 
 The plugin's own desktop **notification** **_always appears_**, ensuring consistent feedback across all host applications.
 
-### The upload
+### Upload procedure
 
 This is the only operation that transmits data over the network.
 
 #### Plugin to service: request
 
-A standard HTTPS `multipart/form-data` POST request:
+The plugin issues an HTTPS `POST` request to `https://uguu.se/upload`:
 
-```http
-POST /upload HTTP/1.1
-Host: uguu.se
-User-Agent: python-requests/2.34.2
-Content-Type: multipart/form-data; boundary=a1b2c3
-
---a1b2c3
-Content-Disposition: form-data; name="files[]"; filename="Screenshot.png"
-Content-Type: image/png
-
-<file content bytes>
---a1b2c3--
-```
-
-The file's **MIME type** is inferred from its filename extension, defaulting to `application/octet-stream`.
+- **Form field**: `files[]` containing the file stream, local filename, and detected **MIME type** (defaulting to `application/octet-stream`).
+- **Headers**: Standard `User-Agent` and `multipart/form-data` boundary framing (constructed automatically by `requests` or `curl`).
+- **Timeout**: Enforces a 60-second limit to avoid hanging the process on stalled network connections.
 
 #### Service to plugin: response
 
@@ -466,33 +482,17 @@ The plugin formats this into `Upload failed (HTTP 413): File too big`. Non-JSON 
 
 ### Desktop integration
 
-Both desktop integration calls use **D-Bus** messages sent via **busctl**. Because `busctl` is included with systemd, no external D-Bus libraries are required.
+Desktop integration calls run only **_after closing the Purpose socket_** so the host application finishes immediately without waiting for desktop IPC. Both actions invoke **D-Bus** methods via **busctl**:
 
-#### Clipboard
-
-The link is sent to **Klipper**, which preserves clipboard contents after the plugin process exits:
-
-| Service           | Object path | Method                 | Parameter             |
-| :---------------- | :---------- | :--------------------- | :-------------------- |
-| `org.kde.klipper` | `/klipper`  | `setClipboardContents` | The returned link URL |
-
-#### Notification
-
-Notifications use the standard freedesktop Notifications interface implemented by Plasma:
-
-| Parameter | Value                                                                |
-| :-------- | :------------------------------------------------------------------- |
-| App name  | `Uguu`                                                               |
-| Icon      | `cloud-upload` on success, `dialog-error` on failure                 |
-| Summary   | `Uploaded to Uguu` or `Uguu upload failed`                           |
-| Body      | Formatted HTML with local path, clickable link, and clipboard status |
-| Hints     | `urgency = 2` (critical) on failure, none on success                 |
-| Timeout   | `-1` (Plasma default)                                                |
+- **Klipper clipboard**: Calls `org.kde.klipper.klipper.setClipboardContents` with the public link URL, ensuring the link remains in clipboard history after the plugin exits.
+- **Desktop notification**: Calls `org.freedesktop.Notifications.Notify` using the `susssasa{sv}i` signature:
+  - **On success**: Displays title `"Uploaded to Uguu"`, icon `"cloud-upload"`, and a body with the clickable link and clipboard notice.
+  - **On failure**: Displays title `"Uguu upload failed"`, icon `"dialog-error"`, the error message, and hint `urgency = 2` (critical) so the popup remains visible until dismissed.
 
 > [!tip]
 > Notifications from CLI tools without desktop entries appear under _Other applications_ in Plasma. To preserve them in notification history after popups close, enable _Show in history_ for Other applications in System Settings › Notifications.
 
-## Error handling
+### Error handling
 
 All failures follow a single consistent path:
 
@@ -504,7 +504,7 @@ All failures follow a single consistent path:
 
 ![The error path](diagrams/out/how-it-works-errors.svg)
 
-### Common error messages
+#### Common error messages
 
 | Error text                                                        | Cause                                                                                                                       |
 | :---------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |

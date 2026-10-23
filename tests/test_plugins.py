@@ -666,7 +666,7 @@ def run_suite(
 
     Args:
         label:         Implementation label ("python" or "bash").
-        install_flags: Extra CLI flags passed to `install.sh` (e.g. `["--bash"]`).
+        install_flags: Extra CLI flags passed to `install.sh` (e.g. `["-i", "bash"]`).
         plugin_id:     Plugin identifier (e.g. `"uguu_upload"`).
         cases:         List of test cases to run.
         root:          Temporary working directory.
@@ -721,7 +721,7 @@ def main() -> int:
             ),
             run_suite(
                 "bash",
-                ["--bash"],
+                ["-i", "bash"],
                 "uguu_upload",
                 build_cases("curl exit code 6"),
                 root,

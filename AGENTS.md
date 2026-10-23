@@ -1,10 +1,12 @@
 # Project Guidelines
 
-## Project Overview & Workflow
+## Project Overview and Workflow
 
 - **Purpose**: Scripted Export plugins for **KDE Purpose** (`src/python/` and `src/bash/`), shared Python helpers in `src/python/common/purpose_common.py`.
 - **Install**: Run `./install.sh` after changes. It **_copies_** (never symlinks) `metadata.json`, `main.*`, and `purpose_common.py` into `~/.local/share/kpackage/Purpose/<plugin>/`.
+- **Configuration**: User tokens, API keys, and settings reside in `~/.config/kde-purpose-plugins/` (`$XDG_CONFIG_HOME/kde-purpose-plugins/`).
 - **Tests**: Always run tests via `./tests/run.sh` (uses local fakes in `tests/fakes/` so uploads, **Klipper**, and **notification** calls never touch the network or live desktop).
+- **Network requests**: Always pass `USER_AGENT = "kde-purpose-plugins/1.0 (KDE Plasma)"` to prevent anti-bot and CDN blocks (e.g. Cloudflare).
 - **KDE Purpose protocol invariants**:
   - Connect to `--server` **Unix socket** first before any code or import that can fail (exiting before connecting crashes the host app).
   - Read the **CBOR** request before running dependency or file checks (closing a socket with unread bytes resets it and drops the error reply).
@@ -26,8 +28,8 @@
 ### Wording & explanations
 
 - Short sentences, short paragraphs (2–4 sentences max).
-- Explain the rationale: Clarify *why* technologies and architectural choices are used (e.g. why Unix sockets over `stdin`/`stdout`, why boundary strings in HTTP multipart).
-- Concrete examples: Pair non-trivial concepts with minimal, realistic code snippets (Python, Bash, HTTP, ASCII bit diagrams).
+- Explain the rationale: Clarify _why_ technologies and architectural choices are used (e.g. why Unix sockets over `stdin`/`stdout`, why boundary strings in HTTP multipart).
+- Concrete examples: Pair non-trivial concepts with minimal, realistic code snippets (Python, Bash, ASCII bit diagrams).
 - Prefer lists and tables over prose:
   - Use tables for dense multi-column structured data (token maps, byte layouts, error catalogs, fields).
   - Use single-level bullet lists when items require 1–2 explanatory sentences (easier to read than cramped table cells).

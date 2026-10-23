@@ -7,7 +7,7 @@ package "Your computer" {
     rectangle "**Host app**\nSpectacle · Dolphin · Krusader" as host
     rectangle "**KDE Purpose**\nstarts the plugin" as purpose
     rectangle "**Plugin**\nmain.py + common" as plugin
-    file "**The file**" as file
+    file "**The file to upload**" as file
     rectangle "**Plasma desktop**\nNotifications · Klipper" as plasma
 }
 

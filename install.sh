@@ -5,13 +5,14 @@
 # Description:
 # - Builds each plugin's KPackage directory structure and copies it into:
 #   ~/.local/share/kpackage/Purpose/<plugin>/
+# - Installs Python plugins by default; use -i to select an implementation.
 # - Re-run after making changes: installed files are copies, not symlinks.
 #
-# Usage: ./install.sh [--bash] [--uninstall] [PLUGIN...]
+# Usage: ./install.sh [-l|--list] [-i IMPL] [-r|--remove] [PLUGIN...]
 #
 #------------------------------------------------------------------------------
 # Author: midvok
-# Update: 2026-10-21
+# Update: 2026-10-22
 #==============================================================================
 
 # Bash strict mode
@@ -23,16 +24,18 @@ set -euo pipefail
 usage() {
     cat <<EOF
 Install or remove KDE Purpose export plugins in ~/.local/share/kpackage/Purpose/.
+Installs Python plugins by default unless specified otherwise with -i.
 
 Usage: ./install.sh [OPTIONS] [PLUGIN...]
 
 Options:
-  --bash       Use the Bash version where available (e.g. uguu_upload)
-  --uninstall  Remove the specified plugins (or all installed plugins)
-  -h, --help   Display this help message
+  -l, --list    List available plugins and their implementations
+  -i IMPL       Plugin implementation to install (default: python)
+  -r, --remove  Remove the specified plugins (or all installed plugins)
+  -h, --help    Display this help message
 
 Arguments:
-  PLUGIN       One or more plugin IDs to install (default: all in src/python/)
+  PLUGIN        One or more plugin IDs to install (default: all)
 EOF
 }
 
@@ -44,8 +47,8 @@ REPO=$(cd "$(dirname "$0")" && pwd)
 SRC=$REPO/src
 DEST=${XDG_DATA_HOME:-$HOME/.local/share}/kpackage/Purpose
 
-# Global CLI flags
-USE_BASH=0
+# Target implementation (defaults to python)
+TARGET_IMPL=python
 
 #------------------------------------------------------------------------------
 # HELPERS
@@ -62,36 +65,65 @@ warn() {
 #------------------------------------------------------------------------------
 # DISCOVERY
 #------------------------------------------------------------------------------
-# Prints the unique IDs of all available plugins (one per line): discovers
-# every directory under src/python/ except the shared common/ library.
+# Discovers all existing plugins across src/ and prints a formatted table
+# showing their available implementations (e.g. bash, python).
 #------------------------------------------------------------------------------
-all_plugins() {
-    local dir
+list_plugins() {
+    local dir rel impl id
+    local -A seen=() plugin_impls=()
+    local plugins=()
 
-    # Strip trailing slash with ${dir%/} and extract directory name with ${dir##*/}
-    for dir in "$SRC"/python/*/; do
-        dir=${dir%/}
-        [[ ${dir##*/} != common ]] && printf '%s\n' "${dir##*/}"
+    # Discover unique plugin IDs and implementations across all source trees
+    for dir in "$SRC"/*/*/; do
+        [[ -f $dir/metadata.json ]] || continue
+        rel=${dir#"$SRC"/}
+        impl=${rel%%/*}
+        id=${dir%/}
+        id=${id##*/}
+
+        if [[ -z ${seen[$id]:-} ]]; then
+            seen[$id]=1
+            plugins+=("$id")
+        fi
+
+        if [[ -z ${plugin_impls[$id]:-} ]]; then
+            plugin_impls[$id]="$impl"
+        else
+            plugin_impls[$id]="${plugin_impls[$id]}, $impl"
+        fi
     done
+
+    # Sort plugin IDs alphabetically
+    ((${#plugins[@]})) && mapfile -t plugins < <(printf '%s\n' "${plugins[@]}" | sort)
+
+    # Format output as an aligned table
+    {
+        printf '%s\t%s\n' "PLUGIN" "AVAILABLE"
+        for id in "${plugins[@]}"; do
+            printf '%s\t%s\n' "$id" "${plugin_impls[$id]}"
+        done
+    } | column -t -s $'\t'
 }
 
 #------------------------------------------------------------------------------
-# Returns the implementation variant ("bash" or "python") to install for
-# plugin $1 based on availability and the --bash flag.
+# Prints the unique IDs of all available plugins for implementation $1
+# (defaults to $TARGET_IMPL).
 #------------------------------------------------------------------------------
-implementation() {
-    # Prefer Bash version if requested and available; otherwise use Python
-    if ((USE_BASH)) && [[ -d $SRC/bash/$1 ]]; then
-        echo bash
-    else
-        echo python
-    fi
+all_plugins() {
+    local impl=${1:-$TARGET_IMPL} dir
+
+    # Find directories containing metadata.json for the target implementation
+    for dir in "$SRC/$impl"/*/; do
+        [[ -f $dir/metadata.json ]] || continue
+        dir=${dir%/}
+        printf '%s\n' "${dir##*/}"
+    done
 }
 
 #------------------------------------------------------------------------------
 # INSTALL
 #------------------------------------------------------------------------------
-# Installs plugin $1 into $DEST/$1:
+# Installs plugin $1 into $DEST/$1 using implementation $TARGET_IMPL:
 #   metadata.json + contents/code/main.* (+ purpose_common.py for Python)
 #
 # Copies files rather than creating symlinks: Python resolves symlinked scripts
@@ -99,16 +131,15 @@ implementation() {
 # prevent main.py from finding purpose_common.py next to it.
 #------------------------------------------------------------------------------
 install_plugin() {
-    local id=$1 impl src target code
+    local id=$1 impl=$TARGET_IMPL src target code
 
-    impl=$(implementation "$id")
     src=$SRC/$impl/$id
     target=$DEST/$id
     code=$target/contents/code
-    [[ -f $src/metadata.json ]] || die "Unknown plugin: $id"
+    [[ -f $src/metadata.json ]] || die "Plugin '$id' has no '$impl' implementation."
 
     # Safely remove existing installation and create KPackage directory layout
-    remove_plugin "$id"
+    remove_plugin "$id" || true
     mkdir -p "$code"
 
     # Copy metadata to plugin root; scripts and libraries go to contents/code/
@@ -122,9 +153,10 @@ install_plugin() {
 }
 
 #------------------------------------------------------------------------------
-# UNINSTALL
+# REMOVE
 #------------------------------------------------------------------------------
-# Safely removes plugin $1 from $DEST if present.
+# Safely removes plugin $1 from $DEST if present. Returns 0 if removed, 1 if
+# the plugin was not installed.
 #
 # Only removes a symlink (e.g. an old Stow link) or a directory verified to
 # contain a Purpose metadata.json file, never touching unexpected folders.
@@ -135,12 +167,16 @@ remove_plugin() {
     if [[ -L $target ]]; then
         # Remove legacy symlinks (e.g. from Stow)
         rm -f "$target"
+        return 0
     elif [[ -f $target/metadata.json ]]; then
         # Verified Purpose plugin folder: safe to delete
         rm -rf "$target"
+        return 0
     elif [[ -e $target ]]; then
         die "$target exists but is not a Purpose plugin, not touching it."
     fi
+
+    return 1
 }
 
 #------------------------------------------------------------------------------
@@ -193,14 +229,19 @@ check_deps() {
 # ENTRY POINT
 #------------------------------------------------------------------------------
 main() {
-    local uninstall=0 plugins=() id impls=""
-    USE_BASH=0
+    local remove=0 list=0 plugins=() id
 
-    # Parse command-line options and target plugin arguments
+    TARGET_IMPL=python
+
+    # Parse CLI options
     while (($#)); do
         case $1 in
-            --bash) USE_BASH=1 ;;
-            --uninstall) uninstall=1 ;;
+            -l | --list) list=1 ;;
+            -i) shift
+                (($#)) || die "Option -i requires an argument (e.g. 'bash', 'python')"
+                TARGET_IMPL=$1
+                ;;
+            -r | --remove) remove=1 ;;
             -h | --help) usage; exit 0 ;;
             -*) die "Unknown option: $1 (see --help)" ;;
             *) plugins+=("$1") ;;
@@ -208,25 +249,38 @@ main() {
         shift
     done
 
-    # Default to all discovered plugins if none were specified
-    ((${#plugins[@]})) || mapfile -t plugins < <(all_plugins)
+    # List plugins
+    if ((list)); then
+        list_plugins
+        exit 0
+    fi
+
+    # Validate target implementation exists when installing
+    if ! ((remove)); then
+        [[ -d $SRC/$TARGET_IMPL ]] || \
+            die "Unknown implementation '$TARGET_IMPL' ($SRC/$TARGET_IMPL does not exist)."
+    fi
+
+    # Default to all discovered plugins for the target implementation
+    ((${#plugins[@]})) || mapfile -t plugins < <(all_plugins "$TARGET_IMPL")
+    ((${#plugins[@]})) || die "No plugins found for implementation: $TARGET_IMPL"
 
     # Validate destination directory before making changes
     check_dest
 
     # Install or remove each target plugin
     for id in "${plugins[@]}"; do
-        if ((uninstall)); then
-            remove_plugin "$id"
-            printf 'Removed %s\n' "$id"
+        if ((remove)); then
+            if remove_plugin "$id"; then
+                printf 'Removed %s\n' "$id"
+            fi
         else
             install_plugin "$id"
-            impls+=" $(implementation "$id")"
         fi
     done
 
-    # Verify dependencies for installed variants
-    ((uninstall)) || check_deps "$impls"
+    # Verify dependencies for installed variant
+    ((remove)) || check_deps "$TARGET_IMPL"
 }
 
 main "$@"
